@@ -1,0 +1,9 @@
+[package]
+name    = "recipient_filter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common  = { path = "../common" }
+serde   = { version = "1", features = ["derive"] }
+tracing = "0.1"

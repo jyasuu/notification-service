@@ -1,0 +1,24 @@
+[package]
+name = "mailer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common      = { path = "../common" }
+
+tokio       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+async-trait = { workspace = true }
+chrono      = { workspace = true }
+uuid        = { workspace = true }
+
+# SMTP backend — smtp-transport required for AsyncSmtpTransport and transport::smtp
+lettre = { version = "0.11", features = ["tokio1", "tokio1-native-tls", "builder", "smtp-transport"], default-features = false }
+
+# Webhook backend
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+base64 = { workspace = true }

@@ -1,0 +1,200 @@
+version: "3.9"
+
+# ── Networks ──────────────────────────────────────────────────────────────────
+networks:
+  backend:
+    driver: bridge
+  observability:
+    driver: bridge
+
+# ── Volumes ───────────────────────────────────────────────────────────────────
+volumes:
+  pg_data:
+  business_pg_data:
+  rabbitmq_data:
+  prometheus_data:
+  grafana_data:
+
+# ── Services ──────────────────────────────────────────────────────────────────
+services:
+
+  # ── PostgreSQL (notification-service own DB) ──────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB:       ${POSTGRES_DB:-notifications}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-notifications}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ── PostgreSQL (business service DB — outbox worker source) ───────────────
+  # Used when the outbox worker is enabled (NS_OUTBOX_DATABASE_URL is set).
+  # In production this would be your business service's own database.
+  business-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${BUSINESS_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${BUSINESS_POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB:       ${BUSINESS_POSTGRES_DB:-business}
+    ports:
+      - "${BUSINESS_POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - business_pg_data:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${BUSINESS_POSTGRES_USER:-postgres} -d ${BUSINESS_POSTGRES_DB:-business}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    profiles:
+      - outbox
+
+  # ── RabbitMQ ─────────────────────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+    ports:
+      - "${RABBITMQ_AMQP_PORT:-5672}:5672"
+      - "${RABBITMQ_MGMT_PORT:-15672}:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── Notification service ──────────────────────────────────────────────────
+  notification-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: notification-service:latest
+    restart: unless-stopped
+    # Fix #8: must be longer than the 30 s drain timeout in main.rs.
+    stop_grace_period: 35s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      # Notification-service DB
+      NS_DATABASE__URL:             postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-notifications}
+      # RabbitMQ
+      NS_AMQP__URL:                 amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672
+      NS_AMQP__QUEUE:               ${AMQP_QUEUE:-email.requested}
+      NS_AMQP__EXCHANGE:            ${AMQP_EXCHANGE:-notifications}
+      NS_AMQP__ROUTING_KEY:         ${AMQP_ROUTING_KEY:-email.requested}
+      NS_AMQP__MAX_RETRIES:         ${AMQP_MAX_RETRIES:-3}
+      NS_AMQP__RETRY_BASE_MS:       ${AMQP_RETRY_BASE_MS:-1000}
+      NS_AMQP__MAX_CONCURRENCY:     ${AMQP_MAX_CONCURRENCY:-10}
+      NS_AMQP__OUTBOX_POLL_INTERVAL_MS: ${AMQP_OUTBOX_POLL_INTERVAL_MS:-1000}
+      NS_AMQP__OUTBOX_BATCH_SIZE:   ${AMQP_OUTBOX_BATCH_SIZE:-50}
+      # Outbox worker — set to enable; leave blank to disable.
+      # With the 'outbox' profile: points at the business-postgres container.
+      NS_OUTBOX_DATABASE_URL:       ${NS_OUTBOX_DATABASE_URL:-}
+      # Rate limiting
+      NS_RATE_LIMIT__EMAILS_PER_SECOND: ${RATE_LIMIT_EMAILS_PER_SECOND:-10}
+      NS_RATE_LIMIT__BURST_SIZE:        ${RATE_LIMIT_BURST_SIZE:-20}
+      # Recipient filter (JSON arrays — leave blank for passthrough)
+      NS_FILTER__BLOCKED_EMAILS:    ${FILTER_BLOCKED_EMAILS:-[]}
+      NS_FILTER__BLOCKED_DOMAINS:   ${FILTER_BLOCKED_DOMAINS:-[]}
+      NS_FILTER__ALLOWED_EMAILS:    ${FILTER_ALLOWED_EMAILS:-[]}
+      NS_FILTER__ALLOWED_DOMAINS:   ${FILTER_ALLOWED_DOMAINS:-[]}
+      # HTTP
+      NS_HTTP__PORT:                "8080"
+      NS_METRICS_PORT:              "${METRICS_PORT:-9091}"
+      # Mailer
+      NS_MAILER__BACKEND:           ${MAILER_BACKEND:-smtp}
+      NS_MAILER__HOST:              ${SMTP_HOST:-mailpit}
+      NS_MAILER__PORT:              ${SMTP_PORT:-1025}
+      NS_MAILER__USERNAME:          ${SMTP_USER:-}
+      NS_MAILER__PASSWORD:          ${SMTP_PASS:-}
+      NS_MAILER__FROM_EMAIL:        ${SMTP_FROM:-no-reply@example.com}
+      NS_MAILER__FROM_NAME:         ${SMTP_FROM_NAME:-Notification Service}
+      RUST_LOG:                     ${RUST_LOG:-info}
+    ports:
+      - "${SERVICE_PORT:-8080}:8080"
+      - "${METRICS_PORT:-9091}:9091"
+    networks:
+      - backend
+      - observability
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ── Mailpit — local SMTP catch-all (dev only) ─────────────────────────────
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    ports:
+      - "${MAILPIT_SMTP_PORT:-1025}:1025"
+      - "${MAILPIT_UI_PORT:-8025}:8025"
+    networks:
+      - backend
+    profiles:
+      - dev
+
+  # ── Prometheus ────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    networks:
+      - observability
+    profiles:
+      - observability
+
+  # ── Grafana ───────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.0.0
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER:     ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASS:-admin}
+      GF_USERS_ALLOW_SIGN_UP:     "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    networks:
+      - observability
+    profiles:
+      - observability

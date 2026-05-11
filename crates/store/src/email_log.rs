@@ -1,0 +1,243 @@
+use common::{AppError, EmailLog, EmailStatus};
+use sqlx::PgPool;
+use tracing::instrument;
+use uuid::Uuid;
+
+/// All database operations for the `email_log` table.
+///
+/// Keyed by `(event_id, recipient_email)` — one row per recipient per event.
+#[derive(Clone)]
+pub struct EmailLogStore {
+    pool: PgPool,
+}
+
+impl EmailLogStore {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    /// Insert a PENDING row for one recipient.
+    /// Returns `AppError::Duplicate` if `(event_id, recipient_email)` already exists.
+    ///
+    /// `payload` is stored for retry reconstruction — retried events are
+    /// re-published with the original template variables instead of `{}`.
+    #[instrument(skip(self, payload))]
+    pub async fn insert_pending(
+        &self,
+        event_id: Uuid,
+        event_type: &str,
+        recipient_email: &str,
+        payload: &serde_json::Value,
+    ) -> Result<Uuid, AppError> {
+        let row = sqlx::query!(
+            r#"
+            INSERT INTO email_log (event_id, event_type, recipient_email, status, payload)
+            VALUES ($1, $2, $3, 'PENDING', $4)
+            ON CONFLICT (event_id, recipient_email) DO NOTHING
+            RETURNING id
+            "#,
+            event_id,
+            event_type,
+            recipient_email,
+            payload,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(r) => Ok(r.id),
+            None => Err(AppError::Duplicate(format!("{event_id}/{recipient_email}"))),
+        }
+    }
+
+    #[instrument(skip(self))]
+    pub async fn mark_sent(&self, event_id: Uuid, recipient_email: &str) -> Result<(), AppError> {
+        sqlx::query!(
+            "UPDATE email_log SET status='SENT', updated_at=now() WHERE event_id=$1 AND recipient_email=$2",
+            event_id, recipient_email,
+        ).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    #[instrument(skip(self, error_msg))]
+    pub async fn mark_failed(
+        &self,
+        event_id: Uuid,
+        recipient_email: &str,
+        error_msg: &str,
+        exhausted: bool,
+    ) -> Result<(), AppError> {
+        let status = if exhausted { "FAILED" } else { "PENDING" };
+        sqlx::query!(
+            r#"UPDATE email_log
+               SET retry_count=retry_count+1, last_error=$3, status=$4, updated_at=now()
+               WHERE event_id=$1 AND recipient_email=$2"#,
+            event_id,
+            recipient_email,
+            error_msg,
+            status,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    #[instrument(skip(self, reason))]
+    pub async fn mark_blocked(
+        &self,
+        event_id: Uuid,
+        recipient_email: &str,
+        reason: &str,
+    ) -> Result<(), AppError> {
+        sqlx::query!(
+            "UPDATE email_log SET status='BLOCKED', last_error=$3, updated_at=now() WHERE event_id=$1 AND recipient_email=$2",
+            event_id, recipient_email, reason,
+        ).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// Fetch all delivery rows for an event (one per recipient).
+    #[instrument(skip(self))]
+    pub async fn get_by_event_id(&self, event_id: Uuid) -> Result<Vec<EmailLog>, AppError> {
+        let rows = sqlx::query!(
+            r#"SELECT id, event_id, event_type, recipient_email, status, retry_count,
+                      last_error, payload, created_at, updated_at
+               FROM email_log WHERE event_id=$1 ORDER BY created_at"#,
+            event_id,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        if rows.is_empty() {
+            return Err(AppError::NotFound(event_id.to_string()));
+        }
+
+        Ok(rows
+            .into_iter()
+            .map(|r| EmailLog {
+                id: r.id,
+                event_id: r.event_id,
+                recipient_email: r.recipient_email,
+                event_type: r.event_type,
+                status: parse_status(&r.status),
+                retry_count: r.retry_count,
+                last_error: r.last_error,
+                payload: r.payload,
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+            })
+            .collect())
+    }
+
+    /// Fetch the row for a single recipient within an event.
+    #[instrument(skip(self))]
+    pub async fn get_by_event_and_recipient(
+        &self,
+        event_id: Uuid,
+        recipient_email: &str,
+    ) -> Result<EmailLog, AppError> {
+        let r = sqlx::query!(
+            r#"SELECT id, event_id, event_type, recipient_email, status, retry_count,
+                      last_error, payload, created_at, updated_at
+               FROM email_log WHERE event_id=$1 AND recipient_email=$2"#,
+            event_id,
+            recipient_email,
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("{event_id}/{recipient_email}")))?;
+
+        Ok(EmailLog {
+            id: r.id,
+            event_id: r.event_id,
+            recipient_email: r.recipient_email,
+            event_type: r.event_type,
+            status: parse_status(&r.status),
+            retry_count: r.retry_count,
+            last_error: r.last_error,
+            payload: r.payload,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        })
+    }
+
+    /// Reset a single FAILED recipient row to PENDING for manual replay.
+    /// Uses an atomic UPDATE … WHERE status='FAILED' to avoid the TOCTOU race
+    /// that existed in the old fetch-then-update approach.
+    #[instrument(skip(self))]
+    pub async fn reset_for_retry(
+        &self,
+        event_id: Uuid,
+        recipient_email: &str,
+    ) -> Result<(), AppError> {
+        let result = sqlx::query!(
+            r#"UPDATE email_log SET status='PENDING', retry_count=0, last_error=NULL, updated_at=now()
+               WHERE event_id=$1 AND recipient_email=$2 AND status='FAILED'"#,
+            event_id, recipient_email,
+        ).execute(&self.pool).await?;
+
+        if result.rows_affected() == 0 {
+            return Err(AppError::NotFound(format!(
+                "No FAILED record for {event_id}/{recipient_email}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Atomically reset ALL FAILED rows for an event to PENDING in a single
+    /// UPDATE, returning the email addresses that were actually reset.
+    ///
+    /// Uses a single round-trip to avoid the TOCTOU race in the old
+    /// fetch-then-loop approach.
+    #[instrument(skip(self))]
+    pub async fn reset_all_failed_for_event(
+        &self,
+        event_id: Uuid,
+    ) -> Result<Vec<String>, AppError> {
+        let rows = sqlx::query!(
+            r#"UPDATE email_log
+               SET    status='PENDING', retry_count=0, last_error=NULL, updated_at=now()
+               WHERE  event_id=$1 AND status='FAILED'
+               RETURNING recipient_email"#,
+            event_id,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(|r| r.recipient_email).collect())
+    }
+
+    /// Return the retry_count for a specific recipient row (seeds in-memory counter after restart).
+    #[instrument(skip(self))]
+    pub async fn get_retry_count(
+        &self,
+        event_id: Uuid,
+        recipient_email: &str,
+    ) -> Result<i32, AppError> {
+        let row = sqlx::query!(
+            "SELECT retry_count FROM email_log WHERE event_id=$1 AND recipient_email=$2",
+            event_id,
+            recipient_email,
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("{event_id}/{recipient_email}")))?;
+        Ok(row.retry_count)
+    }
+}
+
+fn parse_status(s: &str) -> EmailStatus {
+    match s {
+        "SENT" => EmailStatus::Sent,
+        "FAILED" => EmailStatus::Failed,
+        "BLOCKED" => EmailStatus::Blocked,
+        _ => EmailStatus::Pending,
+    }
+}
+
+impl EmailLogStore {
+    /// Expose the underlying pool for health checks.
+    pub fn pool(&self) -> &sqlx::PgPool {
+        &self.pool
+    }
+}

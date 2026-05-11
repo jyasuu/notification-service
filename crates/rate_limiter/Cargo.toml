@@ -1,0 +1,11 @@
+[package]
+name    = "rate_limiter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+governor      = { version = "0.6", features = ["futures"] }
+nonzero_ext   = "0.3"
+serde         = { version = "1", features = ["derive"] }
+tokio         = { version = "1", features = ["time"] }
+tracing       = "0.1"

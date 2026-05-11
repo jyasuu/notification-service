@@ -1,0 +1,27 @@
+[package]
+name = "consumer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common           = { path = "../common" }
+store            = { path = "../store" }
+mailer           = { path = "../mailer" }
+rate_limiter     = { path = "../rate_limiter" }
+recipient_filter = { path = "../recipient_filter" }
+
+tokio       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+tracing     = { workspace = true }
+async-trait = { workspace = true }
+anyhow      = { workspace = true }
+thiserror   = { workspace = true }
+
+lapin        = "2"
+tokio-retry  = "0.3"
+futures-lite = "2"
+tokio-util   = { version = "0.7" }
+metrics      = { workspace = true }
+
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }

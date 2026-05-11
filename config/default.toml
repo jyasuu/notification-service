@@ -1,0 +1,65 @@
+# config/default.toml
+# Override any field with environment variables prefixed NS__
+# e.g. NS_DATABASE__URL="postgres://..." NS_MAILER__BACKEND="smtp"
+
+[database]
+url = "postgres://postgres:postgres@localhost:5432/notifications"
+
+# Optional: set NS_OUTBOX_DATABASE_URL to enable the built-in outbox worker.
+# Leave unset if your business service publishes to RabbitMQ directly.
+# outbox_database_url = "postgres://postgres:postgres@localhost:5432/business"
+
+[amqp]
+url                   = "amqp://guest:guest@localhost:5672"
+queue                 = "email.requested"
+exchange              = "notifications"
+routing_key           = "email.requested"
+max_retries           = 3
+retry_base_ms         = 1000
+max_concurrency       = 10      # max parallel message handlers
+outbox_poll_interval_ms = 1000  # ms between outbox scans (when worker enabled)
+outbox_batch_size     = 50      # rows per scan
+
+[http]
+port = 8080
+
+# Port for the Prometheus /metrics endpoint (never expose this publicly).
+metrics_port = 9091
+
+# ── Mail server rate limiting ─────────────────────────────────────────────────
+# Prevents overwhelming the SMTP server or webhook endpoint.
+# Set emails_per_second = 0 to disable.
+# Check your provider's docs: SendGrid free = 100/day, Pro = 100/s, etc.
+[rate_limit]
+emails_per_second = 10   # steady-state throughput cap
+burst_size        = 20   # allows short bursts above the steady rate
+
+# ── Recipient block / allow-list ──────────────────────────────────────────────
+# blocked_emails and blocked_domains are always applied.
+# allowed_emails / allowed_domains activate allowlist mode (staging / dev):
+#   only listed addresses or domains will receive email; all others are dropped.
+# Leave all four empty (default) for passthrough — no filtering.
+[filter]
+blocked_emails  = []   # e.g. ["unsubscribed@example.com"]
+blocked_domains = []   # e.g. ["competitor.com"]
+# Uncomment to enable allowlist mode (recommended for staging):
+# allowed_domains = ["yourcompany.com"]
+# allowed_emails  = ["tester@external.com"]
+
+# ── Choose one backend ────────────────────────────────────────────────────────
+
+# Option A: SMTP
+[mailer]
+backend    = "smtp"
+host       = "smtp.example.com"
+port       = 587
+username   = "user@example.com"
+password   = "secret"
+from_email = "no-reply@example.com"
+from_name  = "Example App"
+
+# Option B: Webhook
+# [mailer]
+# backend    = "webhook"
+# url        = "https://hooks.example.com/email"
+# auth_token = "bearer-token"

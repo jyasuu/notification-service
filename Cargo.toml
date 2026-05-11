@@ -1,0 +1,67 @@
+[workspace]
+members = [
+    "crates/common",
+    "crates/store",
+    "crates/mailer",
+    "crates/consumer",
+    "crates/api",
+    "crates/outbox",
+    "crates/rate_limiter",
+    "crates/recipient_filter",
+    ".",
+]
+resolver = "2"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialisation
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Metrics
+metrics            = "0.23"
+metrics-exporter-prometheus = { version = "0.15", default-features = false, features = ["http-listener"] }
+
+# Misc
+uuid   = { version = "1", features = ["v4", "serde"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+tokio-util = { version = "0.7" }
+
+[package]
+name = "notification-service"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common           = { path = "crates/common" }
+store            = { path = "crates/store" }
+mailer           = { path = "crates/mailer" }
+consumer         = { path = "crates/consumer" }
+api              = { path = "crates/api" }
+outbox           = { path = "crates/outbox" }
+rate_limiter     = { path = "crates/rate_limiter" }
+recipient_filter = { path = "crates/recipient_filter" }
+
+tokio       = { workspace = true }
+tracing     = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow      = { workspace = true }
+serde       = { workspace = true }
+tokio-util  = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+sqlx        = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "macros", "migrate"] }
+axum        = "0.8"
+
+config = "0.14"
