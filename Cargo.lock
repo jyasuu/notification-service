@@ -1812,6 +1812,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "common",
+ "futures",
  "lettre",
  "reqwest",
  "serde",

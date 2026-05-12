@@ -1,10 +1,11 @@
-use store::EmailLogStore;
+use store::{EmailLogStore, TemplateStore};
 
 use crate::publisher::Publisher;
 
 #[derive(Clone)]
 pub struct ApiState {
     pub store: EmailLogStore,
+    pub template_store: TemplateStore,
     /// Used by retry endpoints to re-enqueue events after resetting DB rows.
     pub publisher: Publisher,
     /// When `Some`, every request must supply `Authorization: Bearer <token>`.

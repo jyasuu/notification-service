@@ -125,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
     // ── HTTP API ──────────────────────────────────────────────────────────────
     let api_state = ApiState {
         store: store.clone(),
+        template_store: template_store.clone(),
         publisher,
         api_key: cfg.http.api_key.clone(),
     };

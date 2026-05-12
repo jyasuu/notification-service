@@ -3,7 +3,7 @@ use std::sync::Arc;
 use common::{AppError, EmailEvent, FromOverride, Recipient};
 use mailer::message::ResolvedAttachment;
 use mailer::smtp::is_permanent_smtp_error;
-use mailer::{render_template, EmailMessage, EmailSender};
+use mailer::{render_html_template, render_template, EmailMessage, EmailSender};
 use metrics::{counter, histogram};
 use rate_limiter::MailRateLimiter;
 use recipient_filter::RecipientFilter;
@@ -68,6 +68,7 @@ pub async fn process_recipient(
             event.event_id,
             &event.event_type,
             &recipient.email,
+            recipient.name.as_deref(),
             &event.payload,
             from_override_json.as_ref(),
             attachments_json.as_ref(),
@@ -95,7 +96,7 @@ pub async fn process_recipient(
     // ── 4. Template rendering ────────────────────────────────────────────────
     let (subject, body_html, body_text) = match (
         render_template(&template.subject, &event.payload),
-        render_template(&template.body_html, &event.payload),
+        render_html_template(&template.body_html, &event.payload),
         render_template(&template.body_text, &event.payload),
     ) {
         (Ok(s), Ok(h), Ok(t)) => (s, h, t),
@@ -203,9 +204,28 @@ fn is_valid_local(local: &str) -> bool {
     }
     local.chars().all(|c| {
         c.is_ascii_alphanumeric()
-            || matches!(c, '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '/'
-                         | '=' | '?' | '^' | '_' | '`' | '{' | '|' | '}' | '~'
-                         | '-' | '.')
+            || matches!(
+                c,
+                '!' | '#'
+                    | '$'
+                    | '%'
+                    | '&'
+                    | '\''
+                    | '*'
+                    | '+'
+                    | '/'
+                    | '='
+                    | '?'
+                    | '^'
+                    | '_'
+                    | '`'
+                    | '{'
+                    | '|'
+                    | '}'
+                    | '~'
+                    | '-'
+                    | '.'
+            )
     })
 }
 

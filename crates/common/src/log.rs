@@ -37,6 +37,12 @@ pub struct EmailLog {
     pub event_id: Uuid,
     /// The specific recipient this row tracks.
     pub recipient_email: String,
+    /// Optional display name for the recipient (e.g. "Alice Smith").
+    /// Stored so it can be faithfully re-published on manual retry,
+    /// preventing templates that use {{name}} from rendering the raw
+    /// placeholder on retried deliveries.
+    /// Nullable for rows written before migration 0011.
+    pub recipient_name: Option<String>,
     pub event_type: String,
     pub status: EmailStatus,
     pub retry_count: i32,

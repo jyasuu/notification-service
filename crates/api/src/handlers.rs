@@ -46,7 +46,15 @@ async fn republish_event(state: &ApiState, event_id: Uuid) -> Result<(), ApiErro
 
     let recipients: Vec<serde_json::Value> = logs
         .iter()
-        .map(|l| json!({ "email": l.recipient_email }))
+        .map(|l| {
+            // Preserve the original display name so templates that use {{name}}
+            // render correctly on retried deliveries (pre-0011 rows have NULL
+            // which is omitted, matching the original behaviour).
+            match &l.recipient_name {
+                Some(name) => json!({ "email": l.recipient_email, "name": name }),
+                None => json!({ "email": l.recipient_email }),
+            }
+        })
         .collect();
 
     let envelope = json!({
@@ -177,7 +185,34 @@ pub async fn get_recipient_status(
     })))
 }
 
-// ── Retry ─────────────────────────────────────────────────────────────────────
+// ── Template cache ────────────────────────────────────────────────────────────
+
+/// DELETE /templates/:event_type/cache
+///
+/// Evicts one entry from the in-memory template cache, forcing the next
+/// delivery attempt for that event type to re-fetch from the database.
+/// Use this after editing a row in the `email_template` table so the change
+/// takes effect without a service restart.
+///
+/// Returns 204 No Content on success (even when the key was not cached).
+pub async fn invalidate_template_cache(
+    State(state): State<ApiState>,
+    Path(event_type): Path<String>,
+) -> impl IntoResponse {
+    state.template_store.invalidate(&event_type).await;
+    StatusCode::NO_CONTENT
+}
+
+/// DELETE /templates/cache
+///
+/// Clears the entire in-memory template cache.  All subsequent deliveries
+/// will re-fetch their templates from the database.
+///
+/// Returns 204 No Content.
+pub async fn invalidate_all_template_cache(State(state): State<ApiState>) -> impl IntoResponse {
+    state.template_store.reload_all().await;
+    StatusCode::NO_CONTENT
+}
 
 /// POST /emails/:event_id/recipients/:email/retry
 ///

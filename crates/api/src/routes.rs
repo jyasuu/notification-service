@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde_json::json;
@@ -11,7 +11,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::{
     handlers::{
-        get_email_status, get_recipient_status, health, ready, retry_event, retry_recipient,
+        get_email_status, get_recipient_status, health, invalidate_all_template_cache,
+        invalidate_template_cache, ready, retry_event, retry_recipient,
     },
     state::ApiState,
 };
@@ -36,10 +37,14 @@ pub fn build_router(state: ApiState) -> Router {
             "/emails/:event_id/recipients/:email/retry",
             post(retry_recipient),
         )
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            bearer_auth,
-        ));
+        // Template cache invalidation — useful after editing email_template rows
+        // without restarting the service.
+        .route("/templates/cache", delete(invalidate_all_template_cache))
+        .route(
+            "/templates/:event_type/cache",
+            delete(invalidate_template_cache),
+        )
+        .layer(middleware::from_fn_with_state(state.clone(), bearer_auth));
 
     Router::new()
         .merge(probes)
@@ -53,11 +58,7 @@ pub fn build_router(state: ApiState) -> Router {
 ///
 /// Returns 401 when the header is missing and 403 when the token is wrong,
 /// so callers can distinguish "you forgot auth" from "your token is invalid".
-async fn bearer_auth(
-    State(state): State<ApiState>,
-    request: Request,
-    next: Next,
-) -> Response {
+async fn bearer_auth(State(state): State<ApiState>, request: Request, next: Next) -> Response {
     let Some(expected) = &state.api_key else {
         // Auth disabled — pass through.
         return next.run(request).await;

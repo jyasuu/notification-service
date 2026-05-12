@@ -1,9 +1,33 @@
 use common::AppError;
 use serde_json::Value;
 
+/// Escape HTML special characters to prevent XSS when payload values are
+/// interpolated into the HTML body template.
+///
+/// Only five characters require escaping per WHATWG HTML:
+/// `&`, `<`, `>`, `"`, `'`.
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Render a template string by replacing `{{key}}` placeholders
 /// with values from the JSON payload.
-pub fn render_template(template: &str, payload: &Value) -> Result<String, AppError> {
+///
+/// When `html` is `true`, string values are HTML-escaped before substitution
+/// to prevent XSS in rendered HTML body templates.  Plain-text templates
+/// (`html = false`) receive raw values.
+fn render_template_inner(template: &str, payload: &Value, html: bool) -> Result<String, AppError> {
     let obj = payload
         .as_object()
         .ok_or_else(|| AppError::Template("Payload must be a JSON object".into()))?;
@@ -12,14 +36,26 @@ pub fn render_template(template: &str, payload: &Value) -> Result<String, AppErr
 
     for (key, val) in obj {
         let placeholder = format!("{{{{{key}}}}}");
-        let replacement = match val {
+        let raw = match val {
             Value::String(s) => s.clone(),
             other => other.to_string(),
         };
+        let replacement = if html { escape_html(&raw) } else { raw };
         result = result.replace(&placeholder, &replacement);
     }
 
     Ok(result)
+}
+
+/// Render a plain-text template. Values are substituted verbatim.
+pub fn render_template(template: &str, payload: &Value) -> Result<String, AppError> {
+    render_template_inner(template, payload, false)
+}
+
+/// Render an HTML template. String values are HTML-escaped before
+/// substitution to prevent XSS from untrusted payload data.
+pub fn render_html_template(template: &str, payload: &Value) -> Result<String, AppError> {
+    render_template_inner(template, payload, true)
 }
 
 /// Resolve a (subject_template, html_template, text_template) triplet
@@ -96,5 +132,38 @@ mod tests {
     fn unknown_event_type_is_template_error() {
         let err = templates_for("NONEXISTENT").unwrap_err();
         assert!(matches!(err, AppError::Template(_)));
+    }
+
+    #[test]
+    fn html_template_escapes_ampersand() {
+        let out =
+            render_html_template("<p>{{company}}</p>", &json!({"company": "Acme & Sons"})).unwrap();
+        assert_eq!(out, "<p>Acme &amp; Sons</p>");
+    }
+
+    #[test]
+    fn html_template_escapes_angle_brackets() {
+        let out = render_html_template(
+            "<p>{{name}}</p>",
+            &json!({"name": "<script>alert(1)</script>"}),
+        )
+        .unwrap();
+        assert_eq!(out, "<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>");
+    }
+
+    #[test]
+    fn html_template_escapes_quotes() {
+        let out = render_html_template(
+            "<a href=\"{{url}}\">click</a>",
+            &json!({"url": "\" onclick=\"bad()"}),
+        )
+        .unwrap();
+        assert!(out.contains("&quot;"));
+    }
+
+    #[test]
+    fn plain_template_does_not_escape() {
+        let out = render_template("Hello {{name}}", &json!({"name": "<World>"})).unwrap();
+        assert_eq!(out, "Hello <World>");
     }
 }

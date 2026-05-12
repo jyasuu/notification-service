@@ -5,6 +5,8 @@
 //!
 //! # Fetch strategy
 //!
+//! * All attachments are fetched **concurrently** via `futures::future::try_join_all`,
+//!   reducing total latency from O(n × rtt) to O(max_rtt).
 //! * One HTTP GET per attachment, with a configurable timeout (default 30 s).
 //! * Optional `Authorization: Bearer <token>` for internal service URLs.
 //! * Responses are size-capped at [`MAX_ATTACHMENT_BYTES`] (default 10 MB) to
@@ -23,6 +25,7 @@
 //! | URL already expired (`max_age_secs`) | `permanent:` prefix | No |
 
 use common::{AppError, AttachmentRef};
+use futures::future::try_join_all;
 use reqwest::{Client, StatusCode};
 use tracing::{debug, instrument, warn};
 
@@ -36,30 +39,46 @@ pub const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 
 /// Fetches all attachment URLs for an event and returns resolved bytes.
 ///
-/// Called once per delivery attempt, before the SMTP / webhook backend.
-/// Errors from individual attachments are returned immediately — the first
-/// failure aborts the whole fetch so the caller can decide retry behaviour.
+/// All attachments are fetched **concurrently** so total latency is bounded
+/// by the slowest single attachment rather than the sum of all round-trips.
+/// Metadata and expiry checks run before any network calls.
+///
+/// The returned `Vec` preserves the same order as `refs`.
 #[instrument(skip(client, refs, event_timestamp), fields(count = refs.len()))]
 pub async fn fetch_attachments(
     client: &Client,
     refs: &[AttachmentRef],
     event_timestamp: &chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<ResolvedAttachment>, AppError> {
-    let mut resolved = Vec::with_capacity(refs.len());
-
+    // ── 1. Validate metadata for every attachment before any network call ─────
+    // Fail fast on malformed refs without wasting bandwidth.
     for att_ref in refs {
-        // Metadata + expiry check (no network call)
         att_ref
             .validate(event_timestamp)
             .map_err(AppError::Mailer)?;
+    }
 
-        let data = fetch_one(client, att_ref).await?;
-        resolved.push(ResolvedAttachment {
+    // ── 2. Fetch all URLs concurrently ────────────────────────────────────────
+    // `try_join_all` cancels remaining futures on the first error, which is
+    // the desired behaviour: if any attachment is unavailable we should not
+    // partially attach others to the email.
+    let futures: Vec<_> = refs
+        .iter()
+        .map(|att_ref| fetch_one(client, att_ref))
+        .collect();
+
+    let data_vec = try_join_all(futures).await?;
+
+    // ── 3. Zip resolved bytes back with their metadata (order preserved) ──────
+    let resolved = refs
+        .iter()
+        .zip(data_vec)
+        .map(|(att_ref, data)| ResolvedAttachment {
             filename: att_ref.filename.clone(),
             content_type: att_ref.content_type.clone(),
             data,
-        });
-    }
+        })
+        .collect();
 
     Ok(resolved)
 }

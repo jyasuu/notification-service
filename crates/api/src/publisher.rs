@@ -99,7 +99,9 @@ impl Publisher {
             }
         }
 
-        Err(AppError::Queue("Publisher: publish failed after reconnect".into()))
+        Err(AppError::Queue(
+            "Publisher: publish failed after reconnect".into(),
+        ))
     }
 }
 

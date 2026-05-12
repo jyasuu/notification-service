@@ -9,7 +9,7 @@ use tracing::{debug, info, instrument, warn};
 /// One template row from the `email_template` table.
 #[derive(Debug, Clone)]
 pub struct EmailTemplate {
-    pub subject:   String,
+    pub subject: String,
     pub body_html: String,
     pub body_text: String,
 }
@@ -37,7 +37,7 @@ pub struct EmailTemplate {
 /// service is stateless and restarts in under a second.
 #[derive(Clone)]
 pub struct TemplateStore {
-    pool:  PgPool,
+    pool: PgPool,
     cache: Arc<RwLock<HashMap<String, EmailTemplate>>>,
 }
 
@@ -80,7 +80,7 @@ impl TemplateStore {
 
         if let Some(r) = row {
             let tpl = EmailTemplate {
-                subject:   r.subject,
+                subject: r.subject,
                 body_html: r.body_html,
                 body_text: r.body_text,
             };
@@ -101,7 +101,7 @@ impl TemplateStore {
                 "Template not found in DB — using compile-time fallback"
             );
             let tpl = EmailTemplate {
-                subject:   subject.to_owned(),
+                subject: subject.to_owned(),
                 body_html: body_html.to_owned(),
                 body_text: body_text.to_owned(),
             };
