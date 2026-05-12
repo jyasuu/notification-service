@@ -45,6 +45,10 @@ pub struct AmqpConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct HttpConfig {
     pub port: u16,
+    /// When set, all `/emails/*` endpoints require `Authorization: Bearer <api_key>`.
+    /// Leave unset only when the API is isolated behind a private network.
+    /// Override via `NS__HTTP__API_KEY` environment variable.
+    pub api_key: Option<String>,
 }
 
 /// Which email backend to use.

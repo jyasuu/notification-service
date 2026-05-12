@@ -9,7 +9,7 @@ use mailer::{fetch_attachments, EmailSender};
 use rate_limiter::MailRateLimiter;
 use recipient_filter::RecipientFilter;
 use reqwest::Client;
-use store::EmailLogStore;
+use store::{EmailLogStore, TemplateStore};
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
@@ -25,6 +25,7 @@ use crate::{
 pub async fn run_consumer(
     cfg: ConsumerConfig,
     store: EmailLogStore,
+    template_store: TemplateStore,
     sender: Arc<dyn EmailSender>,
     filter: RecipientFilter,
     rate_limiter: MailRateLimiter,
@@ -49,6 +50,7 @@ pub async fn run_consumer(
         match connect_and_consume(
             &cfg,
             store.clone(),
+            template_store.clone(),
             Arc::clone(&sender),
             filter.clone(),
             rate_limiter.clone(),
@@ -83,6 +85,7 @@ pub async fn run_consumer(
 async fn connect_and_consume(
     cfg: &ConsumerConfig,
     store: EmailLogStore,
+    template_store: TemplateStore,
     sender: Arc<dyn EmailSender>,
     filter: RecipientFilter,
     rate_limiter: MailRateLimiter,
@@ -119,19 +122,19 @@ async fn connect_and_consume(
                     None => { warn!("Consumer stream ended"); return Err(anyhow::anyhow!("stream closed")); }
                 };
 
-                let permit   = Arc::clone(&semaphore).acquire_owned().await.expect("semaphore closed");
-                let store    = store.clone();
-                let sender   = Arc::clone(&sender);
-                let filter   = filter.clone();
-                let rl       = rate_limiter.clone();
-                let cfg      = cfg.clone();
-                let http     = Arc::clone(&http);
-                // Pass shutdown into each task so retry sleeps can be interrupted.
-                let shutdown = shutdown.clone();
+                let permit         = Arc::clone(&semaphore).acquire_owned().await.expect("semaphore closed");
+                let store          = store.clone();
+                let template_store = template_store.clone();
+                let sender         = Arc::clone(&sender);
+                let filter         = filter.clone();
+                let rl             = rate_limiter.clone();
+                let cfg            = cfg.clone();
+                let http           = Arc::clone(&http);
+                let shutdown       = shutdown.clone();
 
                 tokio::spawn(async move {
                     let _permit = permit;
-                    handle_delivery(delivery, store, sender, filter, rl, http, cfg, shutdown).await;
+                    handle_delivery(delivery, store, template_store, sender, filter, rl, http, cfg, shutdown).await;
                 });
             }
         }
@@ -159,6 +162,7 @@ async fn connect_and_consume(
 async fn handle_delivery(
     delivery: lapin::message::Delivery,
     store: EmailLogStore,
+    template_store: TemplateStore,
     sender: Arc<dyn EmailSender>,
     filter: RecipientFilter,
     rate_limiter: MailRateLimiter,
@@ -187,10 +191,6 @@ async fn handle_delivery(
     }
 
     // ── Fetch attachments once for the whole event ───────────────────────────
-    // Errors here apply to all recipients equally, so we NACK the whole
-    // message rather than failing each recipient individually.
-    //   - Permanent errors (4xx, expired URL, size cap) → DLQ (requeue: false)
-    //   - Transient errors (5xx, network)               → requeue: true (broker retries)
     let resolved_attachments: Vec<ResolvedAttachment> = if event.attachments.is_empty() {
         vec![]
     } else {
@@ -219,6 +219,7 @@ async fn handle_delivery(
     for recipient in &event.recipients {
         process_one_recipient(
             &store,
+            &template_store,
             &sender,
             &filter,
             &rate_limiter,
@@ -231,14 +232,13 @@ async fn handle_delivery(
         .await;
     }
 
-    // ACK the whole message — every recipient has been either sent, blocked,
-    // skipped, or exhausted to DLQ at the per-recipient level.
     let _ = delivery.ack(BasicAckOptions::default()).await;
 }
 
 /// Drive one recipient through the send loop with per-recipient retry.
 async fn process_one_recipient(
     store: &EmailLogStore,
+    template_store: &TemplateStore,
     sender: &Arc<dyn EmailSender>,
     filter: &RecipientFilter,
     rate_limiter: &MailRateLimiter,
@@ -255,14 +255,13 @@ async fn process_one_recipient(
         .unwrap_or(0) as u32;
 
     let mut attempt = initial;
-    // Separate counter for consecutive rate-limit waits. Capped independently
-    // so a stuck rate limiter cannot spin forever without consuming a retry slot.
     let mut rl_count: u32 = 0;
     const MAX_RL_WAITS: u32 = 5;
 
     loop {
         match process_recipient(
             store,
+            template_store,
             sender,
             filter,
             rate_limiter,

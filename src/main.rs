@@ -14,7 +14,7 @@ use outbox::{run_outbox_worker, OutboxConfig};
 use rate_limiter::MailRateLimiter;
 use recipient_filter::RecipientFilter;
 use sqlx::postgres::PgPoolOptions;
-use store::EmailLogStore;
+use store::{EmailLogStore, TemplateStore};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -57,7 +57,8 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("Failed to run migrations")?;
 
-    let store = EmailLogStore::new(pool);
+    let store = EmailLogStore::new(pool.clone());
+    let template_store = TemplateStore::new(pool);
     info!("Database ready");
 
     // ── Email sender ──────────────────────────────────────────────────────────
@@ -125,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
     let api_state = ApiState {
         store: store.clone(),
         publisher,
+        api_key: cfg.http.api_key.clone(),
     };
     let router = build_router(api_state);
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.http.port));
@@ -155,6 +157,7 @@ async fn main() -> anyhow::Result<()> {
         if let Err(e) = run_consumer(
             consumer_cfg,
             store,
+            template_store,
             sender,
             filter,
             rate_limiter,

@@ -23,6 +23,11 @@ outbox_batch_size     = 50      # rows per scan
 [http]
 port = 8080
 
+# Optional: bearer token required on all /emails/* endpoints.
+# Set NS__HTTP__API_KEY=<token> in production. Leave unset only when the
+# API is isolated behind a private network (e.g. Kubernetes ClusterIP).
+# api_key = "change-me-in-production"
+
 # Port for the Prometheus /metrics endpoint (never expose this publicly).
 metrics_port = 9091
 

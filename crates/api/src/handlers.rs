@@ -13,12 +13,16 @@ use crate::{errors::ApiError, state::ApiState};
 
 /// Re-publish an event to the queue so the consumer re-processes it.
 ///
-/// Reconstructs the event from `email_log` rows, including the stored `payload`
-/// column (added in migration 0007) so template variables are preserved on retry.
-/// Pre-0007 rows that have `payload = NULL` fall back to `{}` — same as before.
+/// Reconstructs the event from `email_log` rows, including the stored `payload`,
+/// `from_override`, and `attachments` columns so the full original event is
+/// faithfully replayed — not a stripped-down envelope that loses the From
+/// address override or file attachments.
 ///
-/// The consumer's idempotency guard (`ON CONFLICT DO NOTHING`) ensures rows that
-/// are already PENDING are not double-inserted; they simply stay PENDING.
+/// Pre-0009 rows that have `from_override = NULL` or `attachments = NULL`
+/// fall back to omitting those fields (same behaviour as before).
+///
+/// The consumer's idempotency guard (`ON CONFLICT DO NOTHING`) ensures rows
+/// that are already PENDING are not double-inserted; they simply stay PENDING.
 async fn republish_event(state: &ApiState, event_id: Uuid) -> Result<(), ApiError> {
     let logs = state.store.get_by_event_id(event_id).await?;
     if logs.is_empty() {
@@ -27,12 +31,18 @@ async fn republish_event(state: &ApiState, event_id: Uuid) -> Result<(), ApiErro
 
     let event_type = logs[0].event_type.clone();
 
-    // Use the stored payload from the first log row (all recipients of the same
-    // event share the same template payload — store only one canonical copy).
+    // All recipients of the same event share the same template payload,
+    // from_override, and attachments — use the first non-null value found.
     let template_payload = logs
         .iter()
         .find_map(|l| l.payload.clone())
         .unwrap_or(serde_json::Value::Object(Default::default()));
+
+    let from_override = logs.iter().find_map(|l| l.from_override.clone());
+    let attachments = logs
+        .iter()
+        .find_map(|l| l.attachments.clone())
+        .unwrap_or(serde_json::Value::Array(vec![]));
 
     let recipients: Vec<serde_json::Value> = logs
         .iter()
@@ -40,11 +50,13 @@ async fn republish_event(state: &ApiState, event_id: Uuid) -> Result<(), ApiErro
         .collect();
 
     let envelope = json!({
-        "event_id":   event_id,
-        "timestamp":  Utc::now().to_rfc3339(),
-        "type":       event_type,
-        "recipients": recipients,
-        "payload":    template_payload,
+        "event_id":      event_id,
+        "timestamp":     Utc::now().to_rfc3339(),
+        "type":          event_type,
+        "recipients":    recipients,
+        "payload":       template_payload,
+        "from_override": from_override,   // null when not stored (pre-0009 rows)
+        "attachments":   attachments,
     });
     let body =
         serde_json::to_vec(&envelope).map_err(|e| ApiError(AppError::Queue(e.to_string())))?;

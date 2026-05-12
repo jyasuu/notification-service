@@ -125,18 +125,26 @@ impl EmailSender for SmtpSender {
 }
 
 fn classify_smtp_error(err: lettre::transport::smtp::Error) -> AppError {
-    let msg = err.to_string();
-    if msg.contains("421") || msg.contains("450") || msg.contains("451") || msg.contains("452") {
-        warn!(smtp_error = %msg, "SMTP transient 4xx — treating as rate-limited");
-        return AppError::RateLimited(format!("SMTP 4xx: {msg}"));
+    // lettre 0.11 exposes boolean predicate methods on Error; the internal
+    // ErrorKind enum and kind() accessor are private.
+    if err.is_permanent() {
+        // 5xx response: bad recipient, auth failure, policy rejection, etc.
+        // Will never succeed on retry — route straight to DLQ.
+        AppError::Mailer(format!("permanent: SMTP {err}"))
+    } else if err.is_transient() {
+        // 4xx response: server busy, quota, greylisting — retry later.
+        warn!(smtp_error = %err, "SMTP 4xx transient — treating as rate-limited");
+        AppError::RateLimited(format!("SMTP transient: {err}"))
+    } else if err.is_timeout() || err.is_tls() {
+        // Network-level failures — transient, worth retrying.
+        AppError::Mailer(err.to_string())
+    } else if err.is_client() {
+        // Client-side error (invalid address format, builder error) — permanent.
+        AppError::Mailer(format!("permanent: SMTP client error: {err}"))
+    } else {
+        // Unknown / transport shutdown — treat as transient.
+        AppError::Mailer(err.to_string())
     }
-    if msg.contains("535") || msg.contains("534") {
-        return AppError::Mailer(format!("permanent: SMTP auth failure: {msg}"));
-    }
-    if msg.contains(" 55") || msg.contains(" 54") || msg.contains(" 53") {
-        return AppError::Mailer(format!("permanent: SMTP 5xx: {msg}"));
-    }
-    AppError::Mailer(msg)
 }
 
 pub fn is_permanent_smtp_error(err: &AppError) -> bool {

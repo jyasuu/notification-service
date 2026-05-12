@@ -44,6 +44,12 @@ pub struct EmailLog {
     /// Original template payload stored for retry reconstruction.
     /// Nullable for rows written before migration 0007.
     pub payload: Option<serde_json::Value>,
+    /// Per-event From address override stored for retry reconstruction.
+    /// Nullable for rows written before migration 0009.
+    pub from_override: Option<serde_json::Value>,
+    /// URL-based attachment references stored for retry reconstruction.
+    /// Nullable for rows written before migration 0009.
+    pub attachments: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

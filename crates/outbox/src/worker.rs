@@ -8,7 +8,7 @@ use metrics;
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::OutboxConfig;
