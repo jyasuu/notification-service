@@ -78,11 +78,19 @@ auth_token = "bearer-token"  # optional
 
 ## HTTP API
 
-| Method | Path                        | Description                      |
-|--------|-----------------------------|----------------------------------|
-| GET    | `/health`                   | Liveness check                   |
-| GET    | `/emails/:event_id`         | Query delivery status            |
-| POST   | `/emails/:event_id/retry`   | Reset FAILED → PENDING for replay|
+| Method | Path                                        | Description                                   |
+|--------|---------------------------------------------|-----------------------------------------------|
+| GET    | `/health`                                   | Liveness check (always 200 if process is up)  |
+| GET    | `/ready`                                    | Readiness probe — verifies DB connectivity    |
+| GET    | `/emails/:event_id`                         | Delivery status for all recipients in event   |
+| GET    | `/emails/:event_id/recipients/:email`       | Delivery status for one recipient             |
+| POST   | `/emails/:event_id/retry`                   | Reset all FAILED recipients → PENDING         |
+| POST   | `/emails/:event_id/recipients/:email/retry` | Reset one FAILED recipient → PENDING          |
+| DELETE | `/templates/:event_type/cache`              | Evict one template from the in-memory cache   |
+| DELETE | `/templates/cache`                          | Clear the entire template cache               |
+
+> **Kubernetes probes**: use `/ready` for `readinessProbe` and `/health` for `livenessProbe`.
+> `/ready` performs a live DB ping; `/health` is a shallow process check only.
 
 ### Example event (publish to `email.requested` queue)
 
@@ -114,3 +122,19 @@ Messages that exhaust retries are routed to `email.requested.dlq` via the
 Edit `crates/mailer/src/template.rs` → `templates_for()` to add a new
 `event_type` branch. In a production system, replace this with a DB lookup
 against the `email_template` table.
+
+## Business service database migrations
+
+The `migrations/business_db/` folder contains SQL files that must be applied to
+**your business service's database** (not the notification service DB). The
+notification service's own `sqlx::migrate!()` only touches `database.url`.
+
+See [`migrations/business_db/README.md`](migrations/business_db/README.md) for
+the full table and instructions. Quick reference:
+
+```bash
+psql "$BUSINESS_DATABASE_URL" -f migrations/business_db/0002_create_outbox.sql
+psql "$BUSINESS_DATABASE_URL" -f migrations/business_db/0005_outbox_from_override.sql
+psql "$BUSINESS_DATABASE_URL" -f migrations/business_db/0006_outbox_fail_count.sql
+psql "$BUSINESS_DATABASE_URL" -f migrations/business_db/0008_outbox_attachments.sql
+```

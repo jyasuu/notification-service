@@ -15,6 +15,9 @@ pub struct ConsumerConfig {
     /// Maximum number of messages processed concurrently.
     /// Prevents unbounded task spawning under a message burst.
     pub max_concurrency: usize,
+    /// Maximum allowed size per fetched attachment in bytes.
+    /// Attachments exceeding this are permanently rejected (no retry).
+    pub max_attachment_bytes: usize,
 }
 
 impl Default for ConsumerConfig {
@@ -27,6 +30,7 @@ impl Default for ConsumerConfig {
             max_retries: 3,
             retry_base_ms: 1_000,
             max_concurrency: 10,
+            max_attachment_bytes: 10 * 1024 * 1024,
         }
     }
 }

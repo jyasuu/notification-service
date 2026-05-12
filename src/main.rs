@@ -58,8 +58,14 @@ async fn main() -> anyhow::Result<()> {
         .context("Failed to run migrations")?;
 
     let store = EmailLogStore::new(pool.clone());
-    let template_store = TemplateStore::new(pool);
-    info!("Database ready");
+    let template_store = TemplateStore::new_with_ttl(
+        pool,
+        std::time::Duration::from_secs(cfg.template_cache_ttl_secs),
+    );
+    info!(
+        ttl_secs = cfg.template_cache_ttl_secs,
+        "Database ready"
+    );
 
     // ── Email sender ──────────────────────────────────────────────────────────
     let sender: Arc<dyn EmailSender> = match &cfg.mailer {
@@ -151,6 +157,7 @@ async fn main() -> anyhow::Result<()> {
         max_retries: cfg.amqp.max_retries,
         retry_base_ms: cfg.amqp.retry_base_ms,
         max_concurrency: cfg.amqp.max_concurrency,
+        max_attachment_bytes: cfg.max_attachment_bytes,
     };
 
     let consumer_shutdown = shutdown.clone();

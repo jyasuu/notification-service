@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use common::AppError;
 use sqlx::PgPool;
@@ -14,12 +15,21 @@ pub struct EmailTemplate {
     pub body_text: String,
 }
 
+/// A cached template entry together with the instant it was populated.
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    template: EmailTemplate,
+    inserted_at: Instant,
+}
+
 /// DB-backed template store with an in-memory read-through cache.
 ///
 /// # Lookup order
 ///
-/// 1. In-memory cache (no DB round-trip on the hot path).
-/// 2. Database — on cache miss, the row is fetched, cached, and returned.
+/// 1. In-memory cache — returned immediately when the entry is younger than
+///    `cache_ttl`.  A TTL of zero disables the cache entirely (always hits DB).
+/// 2. Database — on cache miss or expired entry, the row is fetched, cached,
+///    and returned.
 /// 3. Compile-time fallback — if the DB has no row for the event type,
 ///    the service falls back to the static templates in
 ///    `mailer::template::templates_for()`.  This keeps the built-in
@@ -28,25 +38,33 @@ pub struct EmailTemplate {
 ///
 /// # Cache invalidation
 ///
-/// The cache is populated lazily and lives for the lifetime of the process.
-/// To pick up template edits: either restart the service, or call
-/// [`TemplateStore::invalidate`] / [`TemplateStore::reload_all`] from an
-/// admin endpoint (not yet implemented — logged as a future extension).
+/// Entries expire automatically after `cache_ttl` (default 5 minutes).
+/// For immediate invalidation without a restart, call
+/// [`TemplateStore::invalidate`] / [`TemplateStore::reload_all`] via the
+/// `DELETE /templates/cache` or `DELETE /templates/:event_type/cache` endpoints.
 ///
-/// For most deployments a restart on template change is acceptable; the
-/// service is stateless and restarts in under a second.
+/// For most deployments the TTL is short enough that operator edits to the
+/// `email_template` table take effect within minutes automatically.
 #[derive(Clone)]
 pub struct TemplateStore {
     pool: PgPool,
-    cache: Arc<RwLock<HashMap<String, EmailTemplate>>>,
+    cache: Arc<RwLock<HashMap<String, CacheEntry>>>,
+    cache_ttl: Duration,
 }
 
 impl TemplateStore {
-    pub fn new(pool: PgPool) -> Self {
+    /// Construct with an explicit TTL.  Pass `Duration::ZERO` to disable caching.
+    pub fn new_with_ttl(pool: PgPool, cache_ttl: Duration) -> Self {
         Self {
             pool,
             cache: Arc::new(RwLock::new(HashMap::new())),
+            cache_ttl,
         }
+    }
+
+    /// Construct with the default TTL (5 minutes).
+    pub fn new(pool: PgPool) -> Self {
+        Self::new_with_ttl(pool, Duration::from_secs(300))
     }
 
     /// Resolve the template for `event_type`.
@@ -56,12 +74,15 @@ impl TemplateStore {
     /// as the old `templates_for()` function).
     #[instrument(skip(self), fields(event_type))]
     pub async fn resolve(&self, event_type: &str) -> Result<EmailTemplate, AppError> {
-        // ── 1. Cache hit ──────────────────────────────────────────────────────
-        {
+        // ── 1. Cache hit (only when TTL is non-zero and entry is fresh) ───────
+        if !self.cache_ttl.is_zero() {
             let cache = self.cache.read().await;
-            if let Some(t) = cache.get(event_type) {
-                debug!("Template cache hit");
-                return Ok(t.clone());
+            if let Some(entry) = cache.get(event_type) {
+                if entry.inserted_at.elapsed() < self.cache_ttl {
+                    debug!("Template cache hit");
+                    return Ok(entry.template.clone());
+                }
+                debug!("Template cache expired");
             }
         }
 
@@ -84,11 +105,13 @@ impl TemplateStore {
                 body_html: r.body_html,
                 body_text: r.body_text,
             };
-            // Populate cache under write lock.
-            self.cache
-                .write()
-                .await
-                .insert(event_type.to_owned(), tpl.clone());
+            self.cache.write().await.insert(
+                event_type.to_owned(),
+                CacheEntry {
+                    template: tpl.clone(),
+                    inserted_at: Instant::now(),
+                },
+            );
             info!("Template loaded from DB and cached");
             return Ok(tpl);
         }
@@ -105,11 +128,14 @@ impl TemplateStore {
                 body_html: body_html.to_owned(),
                 body_text: body_text.to_owned(),
             };
-            // Cache the fallback too so the warning only fires once per type per process lifetime.
-            self.cache
-                .write()
-                .await
-                .insert(event_type.to_owned(), tpl.clone());
+            // Cache the fallback too so the warning only fires once per TTL window.
+            self.cache.write().await.insert(
+                event_type.to_owned(),
+                CacheEntry {
+                    template: tpl.clone(),
+                    inserted_at: Instant::now(),
+                },
+            );
             return Ok(tpl);
         }
 
@@ -131,3 +157,5 @@ impl TemplateStore {
         info!("Template cache cleared");
     }
 }
+
+

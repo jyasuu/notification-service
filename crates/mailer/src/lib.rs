@@ -5,7 +5,7 @@ pub mod smtp;
 pub mod template;
 pub mod webhook;
 
-pub use fetcher::fetch_attachments;
+pub use fetcher::{fetch_attachments, fetch_attachments_with_limit};
 pub use message::{EmailMessage, ResolvedAttachment};
 pub use sender::EmailSender;
 pub use smtp::SmtpSender;

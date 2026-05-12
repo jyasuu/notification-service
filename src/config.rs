@@ -19,6 +19,24 @@ pub struct AppConfig {
     /// Recipient block/allow-list.
     #[serde(default)]
     pub filter: FilterConfig,
+    /// How long resolved templates are cached in memory (seconds).
+    /// Set to 0 to disable caching and always hit the database.
+    /// Default: 300 (5 minutes).
+    #[serde(default = "default_template_cache_ttl_secs")]
+    pub template_cache_ttl_secs: u64,
+    /// Maximum size of a single fetched email attachment in bytes.
+    /// Attachments larger than this are permanently rejected (no retry).
+    /// Default: 10 MiB (10 * 1024 * 1024).
+    #[serde(default = "default_max_attachment_bytes")]
+    pub max_attachment_bytes: usize,
+}
+
+fn default_template_cache_ttl_secs() -> u64 {
+    300
+}
+
+fn default_max_attachment_bytes() -> usize {
+    10 * 1024 * 1024
 }
 
 #[derive(Debug, Deserialize, Clone)]

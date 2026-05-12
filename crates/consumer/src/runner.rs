@@ -5,7 +5,7 @@ use common::{AppError, EmailEvent, Recipient};
 use futures_lite::StreamExt;
 use lapin::{options::*, types::FieldTable, Channel, Connection, ConnectionProperties};
 use mailer::message::ResolvedAttachment;
-use mailer::{fetch_attachments, EmailSender};
+use mailer::{fetch_attachments_with_limit, EmailSender};
 use rate_limiter::MailRateLimiter;
 use recipient_filter::RecipientFilter;
 use reqwest::Client;
@@ -194,7 +194,7 @@ async fn handle_delivery(
     let resolved_attachments: Vec<ResolvedAttachment> = if event.attachments.is_empty() {
         vec![]
     } else {
-        match fetch_attachments(&http, &event.attachments, &event.timestamp).await {
+        match fetch_attachments_with_limit(&http, &event.attachments, &event.timestamp, cfg.max_attachment_bytes).await {
             Ok(atts) => atts,
             Err(ref e) => {
                 let permanent = matches!(e, AppError::Mailer(m) if m.starts_with("permanent:"));

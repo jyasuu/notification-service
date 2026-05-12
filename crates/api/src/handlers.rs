@@ -11,6 +11,70 @@ use uuid::Uuid;
 
 use crate::{errors::ApiError, state::ApiState};
 
+/// Basic email address format check reused from the processor module.
+///
+/// Extracted here so `republish_event` can reject a bad `from_override`
+/// address at the API layer before re-enqueuing — preventing a guaranteed
+/// permanent failure on the consumer side.
+fn is_valid_email(addr: &str) -> bool {
+    if addr.len() > 254 {
+        return false;
+    }
+    let (local, domain) = match addr.split_once('@') {
+        Some(parts) => parts,
+        None => return false,
+    };
+    is_valid_local(local) && is_valid_domain(domain)
+}
+
+fn is_valid_local(local: &str) -> bool {
+    if local.is_empty() || local.len() > 64 {
+        return false;
+    }
+    if local.starts_with('.') || local.ends_with('.') || local.contains("..") {
+        return false;
+    }
+    local.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                '!' | '#'
+                    | '$'
+                    | '%'
+                    | '&'
+                    | '\''
+                    | '*'
+                    | '+'
+                    | '/'
+                    | '='
+                    | '?'
+                    | '^'
+                    | '_'
+                    | '`'
+                    | '{'
+                    | '|'
+                    | '}'
+                    | '~'
+                    | '-'
+                    | '.'
+            )
+    })
+}
+
+fn is_valid_domain(domain: &str) -> bool {
+    if domain.is_empty() || domain.len() > 253 {
+        return false;
+    }
+    let labels: Vec<&str> = domain.split('.').collect();
+    labels.iter().all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    })
+}
+
 /// Re-publish an event to the queue so the consumer re-processes it.
 ///
 /// Reconstructs the event from `email_log` rows, including the stored `payload`,
@@ -39,6 +103,21 @@ async fn republish_event(state: &ApiState, event_id: Uuid) -> Result<(), ApiErro
         .unwrap_or(serde_json::Value::Object(Default::default()));
 
     let from_override = logs.iter().find_map(|l| l.from_override.clone());
+
+    // Validate the from_override email address before re-enqueuing so a stored
+    // bad address is rejected here (400) rather than causing a guaranteed
+    // permanent failure on the consumer side for every retry attempt.
+    if let Some(ref ov) = from_override {
+        if let Some(email) = ov.get("email").and_then(|v| v.as_str()) {
+            if !is_valid_email(email) {
+                return Err(ApiError(AppError::Mailer(format!(
+                    "permanent: stored from_override email address '{email}' is invalid — \
+                     fix the email_log row before retrying"
+                ))));
+            }
+        }
+    }
+
     let attachments = logs
         .iter()
         .find_map(|l| l.attachments.clone())

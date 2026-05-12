@@ -245,7 +245,15 @@ fn parse_status(s: &str) -> EmailStatus {
         "SENT" => EmailStatus::Sent,
         "FAILED" => EmailStatus::Failed,
         "BLOCKED" => EmailStatus::Blocked,
-        _ => EmailStatus::Pending,
+        "PENDING" => EmailStatus::Pending,
+        other => {
+            tracing::error!(
+                status = other,
+                "Unrecognised email_log.status value — defaulting to Pending. \
+                 This indicates a missing code update after a schema migration."
+            );
+            EmailStatus::Pending
+        }
     }
 }
 

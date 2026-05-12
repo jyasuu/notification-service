@@ -51,6 +51,17 @@ blocked_domains = []   # e.g. ["competitor.com"]
 # allowed_domains = ["yourcompany.com"]
 # allowed_emails  = ["tester@external.com"]
 
+# How long resolved templates are cached in memory.
+# Increase for high-throughput deployments; decrease (or set to 0) when editing
+# templates frequently. Operators can also call DELETE /templates/cache for
+# immediate invalidation without restarting the service.
+template_cache_ttl_secs = 300  # 5 minutes
+
+# Maximum size of a single fetched email attachment in bytes.
+# Attachments larger than this are permanently rejected (no retry).
+# Default: 10 MiB. Override with NS__MAX_ATTACHMENT_BYTES.
+max_attachment_bytes = 10485760  # 10 * 1024 * 1024
+
 # ── Choose one backend ────────────────────────────────────────────────────────
 
 # Option A: SMTP

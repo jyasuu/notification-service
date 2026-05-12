@@ -39,6 +39,9 @@ pub const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 
 /// Fetches all attachment URLs for an event and returns resolved bytes.
 ///
+/// Uses the compiled-in [`MAX_ATTACHMENT_BYTES`] cap.  Call
+/// [`fetch_attachments_with_limit`] to supply a config-driven value.
+///
 /// All attachments are fetched **concurrently** so total latency is bounded
 /// by the slowest single attachment rather than the sum of all round-trips.
 /// Metadata and expiry checks run before any network calls.
@@ -49,6 +52,19 @@ pub async fn fetch_attachments(
     client: &Client,
     refs: &[AttachmentRef],
     event_timestamp: &chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<ResolvedAttachment>, AppError> {
+    fetch_attachments_with_limit(client, refs, event_timestamp, MAX_ATTACHMENT_BYTES).await
+}
+
+/// Like [`fetch_attachments`] but with an explicit per-attachment byte cap.
+///
+/// Set `max_bytes` from `AppConfig::mailer_max_attachment_bytes` so operators
+/// can tune the limit without a code change.
+pub async fn fetch_attachments_with_limit(
+    client: &Client,
+    refs: &[AttachmentRef],
+    event_timestamp: &chrono::DateTime<chrono::Utc>,
+    max_bytes: usize,
 ) -> Result<Vec<ResolvedAttachment>, AppError> {
     // ── 1. Validate metadata for every attachment before any network call ─────
     // Fail fast on malformed refs without wasting bandwidth.
@@ -64,7 +80,7 @@ pub async fn fetch_attachments(
     // partially attach others to the email.
     let futures: Vec<_> = refs
         .iter()
-        .map(|att_ref| fetch_one(client, att_ref))
+        .map(|att_ref| fetch_one(client, att_ref, max_bytes))
         .collect();
 
     let data_vec = try_join_all(futures).await?;
@@ -85,7 +101,7 @@ pub async fn fetch_attachments(
 
 /// Fetch a single attachment URL and return the raw bytes.
 #[instrument(skip(client, att_ref), fields(url = %att_ref.url, filename = %att_ref.filename))]
-async fn fetch_one(client: &Client, att_ref: &AttachmentRef) -> Result<Vec<u8>, AppError> {
+async fn fetch_one(client: &Client, att_ref: &AttachmentRef, max_bytes: usize) -> Result<Vec<u8>, AppError> {
     debug!("Fetching attachment");
 
     let mut req = client.get(&att_ref.url);
@@ -134,12 +150,12 @@ async fn fetch_one(client: &Client, att_ref: &AttachmentRef) -> Result<Vec<u8>, 
         AppError::Mailer(format!("attachment '{}' read error: {e}", att_ref.filename))
     })?;
 
-    if bytes.len() > MAX_ATTACHMENT_BYTES {
+    if bytes.len() > max_bytes {
         return Err(AppError::Mailer(format!(
             "permanent: attachment '{}' exceeds size limit ({} > {} bytes)",
             att_ref.filename,
             bytes.len(),
-            MAX_ATTACHMENT_BYTES
+            max_bytes
         )));
     }
 
