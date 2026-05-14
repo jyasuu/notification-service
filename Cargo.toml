@@ -8,7 +8,7 @@ members = [
     "crates/outbox",
     "crates/rate_limiter",
     "crates/recipient_filter",
-    ".",
+    ".", "crates/ns-cli",
 ]
 resolver = "2"
 
