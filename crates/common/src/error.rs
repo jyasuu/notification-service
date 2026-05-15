@@ -34,4 +34,10 @@ pub enum AppError {
 
     #[error("duplicate event (already processed): {0}")]
     Duplicate(String),
+
+    /// A status value was read from the database that has no corresponding
+    /// `EmailStatus` variant.  This indicates either a schema migration that
+    /// added a new status without a matching code update, or data corruption.
+    #[error("unknown email status value in database: '{0}'")]
+    UnknownStatus(String),
 }

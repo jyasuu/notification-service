@@ -17,7 +17,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     config::ConsumerConfig,
-    processor::{is_retryable, process_recipient, RecipientOutcome},
+    processor::{is_retryable, process_recipient, ProcessorContext, RecipientOutcome},
 };
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -31,7 +31,6 @@ pub async fn run_consumer(
     rate_limiter: MailRateLimiter,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
-    // Shared HTTP client for attachment fetching — connection-pooled across tasks.
     let http = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -39,6 +38,15 @@ pub async fn run_consumer(
     let http = Arc::new(http);
     let semaphore = Arc::new(Semaphore::new(cfg.max_concurrency));
     let mut reconnect_delay = Duration::from_secs(2);
+
+    // Build the shared context once; all spawned tasks clone it cheaply.
+    let ctx = ProcessorContext {
+        store,
+        template_store,
+        sender,
+        filter,
+        rate_limiter,
+    };
 
     loop {
         if shutdown.is_cancelled() {
@@ -49,11 +57,7 @@ pub async fn run_consumer(
 
         match connect_and_consume(
             &cfg,
-            store.clone(),
-            template_store.clone(),
-            Arc::clone(&sender),
-            filter.clone(),
-            rate_limiter.clone(),
+            ctx.clone(),
             Arc::clone(&semaphore),
             Arc::clone(&http),
             shutdown.clone(),
@@ -81,14 +85,10 @@ pub async fn run_consumer(
 }
 
 // ── One connection lifetime ───────────────────────────────────────────────────
-#[allow(clippy::too_many_arguments)]
+
 async fn connect_and_consume(
     cfg: &ConsumerConfig,
-    store: EmailLogStore,
-    template_store: TemplateStore,
-    sender: Arc<dyn EmailSender>,
-    filter: RecipientFilter,
-    rate_limiter: MailRateLimiter,
+    ctx: ProcessorContext,
     semaphore: Arc<Semaphore>,
     http: Arc<Client>,
     shutdown: CancellationToken,
@@ -122,19 +122,15 @@ async fn connect_and_consume(
                     None => { warn!("Consumer stream ended"); return Err(anyhow::anyhow!("stream closed")); }
                 };
 
-                let permit         = Arc::clone(&semaphore).acquire_owned().await.expect("semaphore closed");
-                let store          = store.clone();
-                let template_store = template_store.clone();
-                let sender         = Arc::clone(&sender);
-                let filter         = filter.clone();
-                let rl             = rate_limiter.clone();
-                let cfg            = cfg.clone();
-                let http           = Arc::clone(&http);
-                let shutdown       = shutdown.clone();
+                let permit = Arc::clone(&semaphore).acquire_owned().await.expect("semaphore closed");
+                let ctx    = ctx.clone();
+                let cfg    = cfg.clone();
+                let http   = Arc::clone(&http);
+                let shutdown = shutdown.clone();
 
                 tokio::spawn(async move {
                     let _permit = permit;
-                    handle_delivery(delivery, store, template_store, sender, filter, rl, http, cfg, shutdown).await;
+                    handle_delivery(delivery, ctx, http, cfg, shutdown).await;
                 });
             }
         }
@@ -146,51 +142,15 @@ async fn connect_and_consume(
 /// Handle one delivery.
 ///
 /// Attachments are fetched ONCE here at the event level, then the resolved
-/// bytes are passed to every recipient.  This prevents:
-///   - N×M HTTP GETs for N recipients × M attachments
-///   - Pre-signed URL expiry for recipients processed later in the loop
-///
-/// For each recipient in the event:
-/// - Blocked  → logged as BLOCKED, continues to next recipient
-/// - Sent     → logged as SENT,    continues to next recipient
-/// - Skipped  → already processed, continues to next recipient
-/// - Failed   → retried with backoff (per-recipient, independent of others)
+/// bytes are passed to every recipient.  This prevents N×M HTTP GETs and
+/// pre-signed URL expiry for recipients processed later in the loop.
 ///
 /// The AMQP message is ACK'd once ALL recipients are resolved.
 /// It is NACK'd (→ DLQ) only if the message itself cannot be deserialized
 /// or if the event-level attachment fetch fails permanently.
-///
-/// # Per-recipient FAILED recovery
-///
-/// When a recipient exhausts all retries it is marked FAILED in `email_log`
-/// and the AMQP message is still ACK'd (the remaining recipients are
-/// unaffected).  There is no automatic re-queue: recovery requires a manual
-/// operator action via the HTTP API:
-///
-/// ```text
-/// # Reset one recipient and re-enqueue the event
-/// POST /emails/{event_id}/recipients/{email}/retry
-///
-/// # Reset ALL failed recipients for an event
-/// POST /emails/{event_id}/retry
-/// ```
-///
-/// Both endpoints reset the affected row(s) to PENDING and re-publish the
-/// event to RabbitMQ.  The consumer's idempotency guard (ON CONFLICT DO
-/// NOTHING) ensures already-SENT or already-BLOCKED recipients are skipped
-/// on re-delivery; only the reset PENDING rows are re-processed.
-///
-/// For automated recovery, operators can poll `GET /emails/{event_id}` and
-/// trigger the retry endpoint when `summary.failed > 0`, or set up an alert
-/// on the `emails_failed_total` Prometheus metric and the DLQ queue depth.
-#[allow(clippy::too_many_arguments)]
 async fn handle_delivery(
     delivery: lapin::message::Delivery,
-    store: EmailLogStore,
-    template_store: TemplateStore,
-    sender: Arc<dyn EmailSender>,
-    filter: RecipientFilter,
-    rate_limiter: MailRateLimiter,
+    ctx: ProcessorContext,
     http: Arc<Client>,
     cfg: ConsumerConfig,
     shutdown: CancellationToken,
@@ -250,11 +210,7 @@ async fn handle_delivery(
     // Process every recipient independently.
     for recipient in &event.recipients {
         process_one_recipient(
-            &store,
-            &template_store,
-            &sender,
-            &filter,
-            &rate_limiter,
+            &ctx,
             &event,
             recipient,
             &resolved_attachments,
@@ -268,13 +224,8 @@ async fn handle_delivery(
 }
 
 /// Drive one recipient through the send loop with per-recipient retry.
-#[allow(clippy::too_many_arguments)]
 async fn process_one_recipient(
-    store: &EmailLogStore,
-    template_store: &TemplateStore,
-    sender: &Arc<dyn EmailSender>,
-    filter: &RecipientFilter,
-    rate_limiter: &MailRateLimiter,
+    ctx: &ProcessorContext,
     event: &EmailEvent,
     recipient: &Recipient,
     attachments: &[ResolvedAttachment],
@@ -282,7 +233,7 @@ async fn process_one_recipient(
     shutdown: &CancellationToken,
 ) {
     // Seed attempt counter from DB so restarts don't reset the count.
-    let initial = store
+    let initial = ctx.store
         .get_retry_count(event.event_id, &recipient.email)
         .await
         .unwrap_or(0) as u32;
@@ -291,20 +242,9 @@ async fn process_one_recipient(
     let mut rl_count: u32 = 0;
 
     loop {
-        match process_recipient(
-            store,
-            template_store,
-            sender,
-            filter,
-            rate_limiter,
-            event,
-            recipient,
-            attachments,
-        )
-        .await
-        {
+        match process_recipient(ctx, event, recipient, attachments).await {
             RecipientOutcome::Sent | RecipientOutcome::Blocked(_) | RecipientOutcome::Skipped => {
-                return; // all terminal-OK outcomes
+                return;
             }
 
             RecipientOutcome::Failed(ref e) if !is_retryable(e) => {
@@ -314,7 +254,7 @@ async fn process_one_recipient(
                     error    = %e,
                     "Permanent failure for recipient — marking FAILED"
                 );
-                let _ = store
+                let _ = ctx.store
                     .mark_failed(event.event_id, &recipient.email, &e.to_string(), true)
                     .await;
                 return;
@@ -327,13 +267,13 @@ async fn process_one_recipient(
                     attempt,
                     "Max retries exhausted for recipient"
                 );
-                let _ = store
+                let _ = ctx.store
                     .mark_failed(event.event_id, &recipient.email, &e.to_string(), true)
                     .await;
                 return;
             }
 
-            // Rate-limited — back off longer without consuming a retry slot,
+            // Rate-limited — back off without consuming a retry slot,
             // but cap consecutive rate-limit waits to prevent infinite loops.
             RecipientOutcome::Failed(AppError::RateLimited(ref msg)) => {
                 rl_count += 1;
@@ -345,7 +285,7 @@ async fn process_one_recipient(
                         max_rl_waits = cfg.max_rl_waits,
                         "Rate-limit backoff limit reached — marking FAILED"
                     );
-                    let _ = store
+                    let _ = ctx.store
                         .mark_failed(event.event_id, &recipient.email, msg, true)
                         .await;
                     return;
@@ -358,22 +298,19 @@ async fn process_one_recipient(
                     delay_secs = delay.as_secs(),
                     "Rate-limited — backing off without consuming retry slot"
                 );
-                let _ = store
+                let _ = ctx.store
                     .mark_failed(event.event_id, &recipient.email, msg, false)
                     .await;
-                // Issue 2 fix: select against shutdown so this sleep does not
-                // block graceful drain when the process is asked to stop.
                 tokio::select! {
                     _ = sleep(delay) => {}
                     _ = shutdown.cancelled() => return,
                 }
-                // attempt NOT incremented; only rl_count tracks this path
             }
 
             // Transient failure — normal exponential backoff
             RecipientOutcome::Failed(ref e) => {
                 attempt += 1;
-                rl_count = 0; // reset rate-limit counter on a normal transient failure
+                rl_count = 0;
                 let delay = Duration::from_millis(cfg.retry_base_ms * (1 << attempt.min(10)));
                 warn!(
                     event_id = %event.event_id,
@@ -383,11 +320,9 @@ async fn process_one_recipient(
                     error    = %e,
                     "Transient failure — retrying"
                 );
-                let _ = store
+                let _ = ctx.store
                     .mark_failed(event.event_id, &recipient.email, &e.to_string(), false)
                     .await;
-                // Issue 2 fix: select against shutdown so this sleep does not
-                // block graceful drain when the process is asked to stop.
                 tokio::select! {
                     _ = sleep(delay) => {}
                     _ = shutdown.cancelled() => return,

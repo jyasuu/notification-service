@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::AppError;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum EmailStatus {
@@ -18,6 +20,20 @@ impl EmailStatus {
             EmailStatus::Sent => "SENT",
             EmailStatus::Failed => "FAILED",
             EmailStatus::Blocked => "BLOCKED",
+        }
+    }
+}
+
+impl TryFrom<&str> for EmailStatus {
+    type Error = AppError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s {
+            "PENDING" => Ok(EmailStatus::Pending),
+            "SENT" => Ok(EmailStatus::Sent),
+            "FAILED" => Ok(EmailStatus::Failed),
+            "BLOCKED" => Ok(EmailStatus::Blocked),
+            other => Err(AppError::UnknownStatus(other.to_owned())),
         }
     }
 }
@@ -45,7 +61,13 @@ pub struct EmailLog {
     pub recipient_name: Option<String>,
     pub event_type: String,
     pub status: EmailStatus,
+    /// How many automatic retry attempts have been made in the current attempt
+    /// window.  Reset to 0 when an operator manually retries via the HTTP API
+    /// so the recipient gets a fresh set of automatic retries.
     pub retry_count: i32,
+    /// Lifetime delivery attempt counter — never reset, even on manual retry.
+    /// Useful for auditing and detecting persistently failing addresses.
+    pub total_attempts: i32,
     pub last_error: Option<String>,
     /// Original template payload stored for retry reconstruction.
     /// Nullable for rows written before migration 0007.

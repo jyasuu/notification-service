@@ -10,6 +10,20 @@ use recipient_filter::RecipientFilter;
 use store::{EmailLogStore, TemplateStore};
 use tracing::{info, instrument, warn};
 
+/// Shared, cheaply-cloneable context passed to every per-recipient processor call.
+///
+/// Groups the infrastructure dependencies that were previously threaded as
+/// individual arguments through `process_recipient` and its callers.
+/// All fields are either `Clone` or wrapped in `Arc` so cloning is cheap.
+#[derive(Clone)]
+pub struct ProcessorContext {
+    pub store: EmailLogStore,
+    pub template_store: TemplateStore,
+    pub sender: Arc<dyn EmailSender>,
+    pub filter: RecipientFilter,
+    pub rate_limiter: MailRateLimiter,
+}
+
 /// Result of processing one recipient within an event.
 #[derive(Debug)]
 pub enum RecipientOutcome {
@@ -22,30 +36,21 @@ pub enum RecipientOutcome {
 /// Process a single recipient for an event.
 ///
 /// `attachments` are pre-fetched at the event level (once for all recipients)
-/// and passed in as resolved bytes. This avoids re-fetching per-signed URLs
+/// and passed in as resolved bytes. This avoids re-fetching pre-signed URLs
 /// for every recipient, which would waste bandwidth and risk URL expiry for
 /// later recipients in the list.
 ///
 /// Returns the outcome for this recipient. The caller (runner) decides
 /// whether to retry on `Failed`.
-#[instrument(skip(store, template_store, sender, filter, rate_limiter, event, recipient, attachments),
+#[instrument(skip(ctx, event, recipient, attachments),
              fields(event_id = %event.event_id, email = %recipient.email))]
-#[allow(clippy::too_many_arguments)]
 pub async fn process_recipient(
-    store: &EmailLogStore,
-    template_store: &TemplateStore,
-    sender: &Arc<dyn EmailSender>,
-    filter: &RecipientFilter,
-    rate_limiter: &MailRateLimiter,
+    ctx: &ProcessorContext,
     event: &EmailEvent,
     recipient: &Recipient,
     attachments: &[ResolvedAttachment],
 ) -> RecipientOutcome {
     // ── 0. Recipient email validation (before DB write) ─────────────────────
-    // Validate the recipient address structurally before inserting the PENDING
-    // row. An invalid address can never be sent to; failing here keeps the DB
-    // clean and surfaces the bug immediately instead of leaving a PENDING row
-    // that will always fail at the SMTP layer.
     if !is_valid_email(&recipient.email) {
         return RecipientOutcome::Failed(AppError::Mailer(format!(
             "permanent: invalid recipient email address: {}",
@@ -54,20 +59,7 @@ pub async fn process_recipient(
     }
 
     // ── 1. Template lookup (before DB write) ────────────────────────────────
-    // Skip template resolution entirely when the publisher supplied a
-    // pre-rendered body via `body_override`.  We still validate that
-    // `body_override` fields are non-empty to surface misconfigured callers
-    // early, before inserting the PENDING row.
-    //
-    // When `body_override` is absent, resolve the template as normal and
-    // keep the result — it is reused in step 5 to avoid a second DB/cache
-    // round-trip for the same event_type within the same delivery attempt.
-    // Failing early (before insert_pending) keeps the DB clean and prevents
-    // PENDING rows that can never succeed.
     let prefetched_template = if let Some(ov) = event.body_override.as_ref() {
-        // body_override present: validate fields are non-empty before inserting the row.
-        // Failing early keeps the DB clean and surfaces misconfigured callers before
-        // inserting a PENDING row that can never succeed.
         if ov.subject.is_empty() || ov.body_html.is_empty() || ov.body_text.is_empty() {
             return RecipientOutcome::Failed(AppError::Mailer(
                 "permanent: body_override fields (subject, body_html, body_text) must all be non-empty".into(),
@@ -75,22 +67,13 @@ pub async fn process_recipient(
         }
         None
     } else {
-        // No body_override: validate the template exists BEFORE inserting the PENDING row.
-        // If we insert first and then discover an unknown event_type, the row is stuck
-        // PENDING forever (the idempotency guard skips it on every subsequent
-        // redelivery). Failing early keeps the DB clean and surfaces the bug fast.
-        match template_store.resolve(&event.event_type).await {
+        match ctx.template_store.resolve(&event.event_type).await {
             Ok(t) => Some(t),
             Err(e) => return RecipientOutcome::Failed(e),
         }
     };
 
     // ── 2. from_override validation (before DB write) ───────────────────────
-    // Validate the From address override BEFORE inserting the PENDING row.
-    // If we insert first and then discover an invalid address, the row is
-    // stuck PENDING forever: every subsequent redelivery hits the idempotency
-    // guard (Skipped) and the bad address is never surfaced again.
-    // Failing here keeps the DB clean and surfaces the misconfiguration fast.
     let (from_email_override, from_name_override) =
         resolve_from_override(event.from_override.as_ref());
     if let Some(ref addr) = from_email_override {
@@ -101,8 +84,6 @@ pub async fn process_recipient(
     }
 
     // ── 3. Idempotency ───────────────────────────────────────────────────────
-    // Serialise from_override and attachments refs for DB storage so they
-    // can be recovered verbatim when a manual retry re-publishes the event.
     let from_override_json = event
         .from_override
         .as_ref()
@@ -113,7 +94,7 @@ pub async fn process_recipient(
         serde_json::to_value(&event.attachments).ok()
     };
 
-    match store
+    match ctx.store
         .insert_pending(
             event.event_id,
             &event.event_type,
@@ -134,9 +115,9 @@ pub async fn process_recipient(
     }
 
     // ── 4. Recipient filter ───────────────────────────────────────────────────
-    if let Err(AppError::Blocked(reason)) = filter.check(&recipient.email) {
+    if let Err(AppError::Blocked(reason)) = ctx.filter.check(&recipient.email) {
         warn!(reason = %reason, "Recipient blocked — dropping");
-        let _ = store
+        let _ = ctx.store
             .mark_blocked(event.event_id, &recipient.email, &reason)
             .await;
         counter!("emails_blocked_total", "event_type" => event.event_type.clone()).increment(1);
@@ -144,20 +125,13 @@ pub async fn process_recipient(
     }
 
     // ── 5. Template rendering ────────────────────────────────────────────────
-    // When body_override is present, use its pre-rendered content verbatim.
-    // Otherwise use the template resolved (and kept) in the prefetch block above —
-    // no second DB/cache round-trip needed.
     let (subject, body_html, body_text) = if let Some(ov) = &event.body_override {
-        // body_override: skip DB lookup and {{placeholder}} rendering entirely.
-        // The fields were validated to be non-empty in the prefetch block above.
         (
             ov.subject.clone(),
             ov.body_html.clone(),
             ov.body_text.clone(),
         )
     } else {
-        // prefetched_template is Some when body_override is None (guaranteed by
-        // the prefetch block above which sets Some(t) on the else branch).
         let template = prefetched_template
             .expect("template must have been pre-fetched when body_override is absent");
         match (
@@ -167,16 +141,13 @@ pub async fn process_recipient(
         ) {
             (Ok(s), Ok(h), Ok(t)) => (s, h, t),
             (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
-                let _ = store
+                let _ = ctx.store
                     .mark_failed(event.event_id, &recipient.email, &e.to_string(), true)
                     .await;
                 return RecipientOutcome::Failed(e);
             }
         }
     };
-
-    // from_email_override / from_name_override were already resolved and
-    // validated in step 2 (before insert_pending). No work needed here.
 
     let msg = EmailMessage {
         event_id: event.event_id,
@@ -187,20 +158,18 @@ pub async fn process_recipient(
         body_text,
         from_email_override,
         from_name_override,
-        // Clone resolved bytes — cheap Arc or Vec clone; bytes were fetched once
-        // at the event level in handle_delivery() and shared across all recipients.
         attachments: attachments.to_vec(),
     };
 
     // ── 6. Rate-limit token ──────────────────────────────────────────────────
-    rate_limiter.wait_for_token().await;
+    ctx.rate_limiter.wait_for_token().await;
 
     // ── 7. Send ───────────────────────────────────────────────────────────────
     let send_start = std::time::Instant::now();
-    match sender.send(&msg).await {
+    match ctx.sender.send(&msg).await {
         Ok(()) => {
             let elapsed = send_start.elapsed().as_secs_f64();
-            let _ = store.mark_sent(event.event_id, &recipient.email).await;
+            let _ = ctx.store.mark_sent(event.event_id, &recipient.email).await;
             counter!("emails_sent_total",
                 "event_type" => event.event_type.clone())
             .increment(1);

@@ -198,12 +198,13 @@ pub async fn get_email_status(
                 EmailStatus::Pending => pending += 1,
             }
             json!({
-                "email":      log.recipient_email,
-                "status":     log.status.as_str(),
-                "retryCount": log.retry_count,
-                "lastError":  log.last_error,
-                "createdAt":  log.created_at,
-                "updatedAt":  log.updated_at,
+                "email":         log.recipient_email,
+                "status":        log.status.as_str(),
+                "retryCount":    log.retry_count,
+                "totalAttempts": log.total_attempts,
+                "lastError":     log.last_error,
+                "createdAt":     log.created_at,
+                "updatedAt":     log.updated_at,
             })
         })
         .collect();
@@ -234,13 +235,14 @@ pub async fn get_recipient_status(
         .await?;
 
     Ok(Json(json!({
-        "eventId":      log.event_id,
-        "email":        log.recipient_email,
-        "status":       log.status.as_str(),
-        "retryCount":   log.retry_count,
-        "lastError":    log.last_error,
-        "createdAt":    log.created_at,
-        "updatedAt":    log.updated_at,
+        "eventId":       log.event_id,
+        "email":         log.recipient_email,
+        "status":        log.status.as_str(),
+        "retryCount":    log.retry_count,
+        "totalAttempts": log.total_attempts,
+        "lastError":     log.last_error,
+        "createdAt":     log.created_at,
+        "updatedAt":     log.updated_at,
     })))
 }
 

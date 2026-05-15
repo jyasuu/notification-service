@@ -65,3 +65,12 @@ sqlx        = { version = "0.8", features = ["runtime-tokio-rustls", "postgres",
 axum        = "0.8"
 
 config = "0.14"
+
+
+
+[profile.release]
+opt-level = "s"      # Optimize for size ("z" is even more aggressive, but "s" preserves performance)
+lto = true           # Enable Link-Time Optimization (removes dead code across crates)
+codegen-units = 1    # Reduces parallel generation, allowing deeper size optimization
+strip = true         # Automatically strip symbols and debug info (this is the massive space saver)
+panic = "abort"      # Removes stack unwinding code (optional; saves size but changes panic behavior)

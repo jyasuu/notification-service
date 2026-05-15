@@ -79,7 +79,8 @@ impl EmailLogStore {
         let status = if exhausted { "FAILED" } else { "PENDING" };
         sqlx::query!(
             r#"UPDATE email_log
-               SET retry_count=retry_count+1, last_error=$3, status=$4, updated_at=now()
+               SET retry_count=retry_count+1, total_attempts=total_attempts+1,
+                   last_error=$3, status=$4, updated_at=now()
                WHERE event_id=$1 AND recipient_email=$2"#,
             event_id,
             recipient_email,
@@ -110,7 +111,7 @@ impl EmailLogStore {
     pub async fn get_by_event_id(&self, event_id: Uuid) -> Result<Vec<EmailLog>, AppError> {
         let rows = sqlx::query!(
             r#"SELECT id, event_id, event_type, recipient_email, recipient_name, status, retry_count,
-                      last_error, payload, from_override, attachments, created_at, updated_at
+                      total_attempts, last_error, payload, from_override, attachments, created_at, updated_at
                FROM email_log WHERE event_id=$1 ORDER BY created_at"#,
             event_id,
         )
@@ -123,22 +124,25 @@ impl EmailLogStore {
 
         Ok(rows
             .into_iter()
-            .map(|r| EmailLog {
-                id: r.id,
-                event_id: r.event_id,
-                recipient_email: r.recipient_email,
-                recipient_name: r.recipient_name,
-                event_type: r.event_type,
-                status: parse_status(&r.status),
-                retry_count: r.retry_count,
-                last_error: r.last_error,
-                payload: r.payload,
-                from_override: r.from_override,
-                attachments: r.attachments,
-                created_at: r.created_at,
-                updated_at: r.updated_at,
+            .map(|r| {
+                Ok(EmailLog {
+                    id: r.id,
+                    event_id: r.event_id,
+                    recipient_email: r.recipient_email,
+                    recipient_name: r.recipient_name,
+                    event_type: r.event_type,
+                    status: EmailStatus::try_from(r.status.as_str())?,
+                    retry_count: r.retry_count,
+                    total_attempts: r.total_attempts,
+                    last_error: r.last_error,
+                    payload: r.payload,
+                    from_override: r.from_override,
+                    attachments: r.attachments,
+                    created_at: r.created_at,
+                    updated_at: r.updated_at,
+                })
             })
-            .collect())
+            .collect::<Result<Vec<_>, AppError>>()?)
     }
 
     /// Fetch the row for a single recipient within an event.
@@ -150,7 +154,7 @@ impl EmailLogStore {
     ) -> Result<EmailLog, AppError> {
         let r = sqlx::query!(
             r#"SELECT id, event_id, event_type, recipient_email, recipient_name, status, retry_count,
-                      last_error, payload, from_override, attachments, created_at, updated_at
+                      total_attempts, last_error, payload, from_override, attachments, created_at, updated_at
                FROM email_log WHERE event_id=$1 AND recipient_email=$2"#,
             event_id,
             recipient_email,
@@ -165,8 +169,9 @@ impl EmailLogStore {
             recipient_email: r.recipient_email,
             recipient_name: r.recipient_name,
             event_type: r.event_type,
-            status: parse_status(&r.status),
+            status: EmailStatus::try_from(r.status.as_str())?,
             retry_count: r.retry_count,
+            total_attempts: r.total_attempts,
             last_error: r.last_error,
             payload: r.payload,
             from_override: r.from_override,
@@ -179,6 +184,11 @@ impl EmailLogStore {
     /// Reset a single FAILED recipient row to PENDING for manual replay.
     /// Uses an atomic UPDATE … WHERE status='FAILED' to avoid the TOCTOU race
     /// that existed in the old fetch-then-update approach.
+    ///
+    /// `retry_count` is reset to 0 so the recipient gets a full fresh set of
+    /// automatic retries.  `total_attempts` is intentionally NOT reset — it is
+    /// a lifetime counter used for auditing and detecting persistently failing
+    /// addresses.
     #[instrument(skip(self))]
     pub async fn reset_for_retry(
         &self,
@@ -202,8 +212,9 @@ impl EmailLogStore {
     /// Atomically reset ALL FAILED rows for an event to PENDING in a single
     /// UPDATE, returning the email addresses that were actually reset.
     ///
-    /// Uses a single round-trip to avoid the TOCTOU race in the old
-    /// fetch-then-loop approach.
+    /// `retry_count` is reset to 0 so each recipient gets a fresh set of
+    /// automatic retries.  `total_attempts` is intentionally NOT reset — it
+    /// is a lifetime counter preserved across manual retries for auditing.
     #[instrument(skip(self))]
     pub async fn reset_all_failed_for_event(
         &self,
@@ -239,27 +250,7 @@ impl EmailLogStore {
         .ok_or_else(|| AppError::NotFound(format!("{event_id}/{recipient_email}")))?;
         Ok(row.retry_count)
     }
-}
 
-fn parse_status(s: &str) -> EmailStatus {
-    match s {
-        "SENT" => EmailStatus::Sent,
-        "FAILED" => EmailStatus::Failed,
-        "BLOCKED" => EmailStatus::Blocked,
-        "PENDING" => EmailStatus::Pending,
-        other => {
-            tracing::error!(
-                status = other,
-                "Unrecognised email_log.status value '{}' — defaulting to Pending. \
-                 This indicates a missing code update after a schema migration.",
-                other
-            );
-            EmailStatus::Pending
-        }
-    }
-}
-
-impl EmailLogStore {
     /// Expose the underlying pool for health checks.
     pub fn pool(&self) -> &sqlx::PgPool {
         &self.pool

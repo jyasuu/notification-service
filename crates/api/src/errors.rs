@@ -27,6 +27,10 @@ impl IntoResponse for ApiError {
                 (StatusCode::UNPROCESSABLE_ENTITY, msg.clone())
             }
             AppError::Blocked(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            AppError::UnknownStatus(msg) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("data integrity error: unknown status '{msg}' — check DB schema vs code version"),
+            ),
             other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
         };
 
