@@ -9,7 +9,11 @@ use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
 use tabled::Tabled;
 
-use crate::{cli::OutboxArgs, config::CliConfig, output};
+use crate::{
+    cli::{OutboxArgs, OutputFormat},
+    config::CliConfig,
+    output,
+};
 
 #[derive(Debug, Serialize, Tabled)]
 struct OutboxRow {
@@ -29,7 +33,7 @@ struct OutboxRow {
     published_at: String,
 }
 
-pub async fn run(args: OutboxArgs, cfg: CliConfig) -> Result<()> {
+pub async fn run(args: OutboxArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<()> {
     let db_url = match cfg.outbox_database_url {
         Some(u) => u,
         None => bail!(
@@ -81,6 +85,9 @@ pub async fn run(args: OutboxArgs, cfg: CliConfig) -> Result<()> {
         })
         .collect();
 
-    output::print_table(&display);
+    match fmt {
+        OutputFormat::Json => output::print_json(&display),
+        OutputFormat::Table => output::print_table(&display),
+    }
     Ok(())
 }

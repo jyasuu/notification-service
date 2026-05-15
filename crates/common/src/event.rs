@@ -55,6 +55,52 @@ pub struct EmailEvent {
     /// See [`AttachmentRef`] for the full contract and URL guidance.
     #[serde(default)]
     pub attachments: Vec<AttachmentRef>,
+
+    /// Optional direct body override — bypasses template lookup entirely.
+    ///
+    /// When present, the notification service uses `subject`, `body_html`,
+    /// and `body_text` verbatim instead of looking up and rendering the
+    /// template registered for `event_type`.  The `payload` field is still
+    /// stored for audit purposes but is **not** used for rendering.
+    ///
+    /// Use this when the calling service has already rendered the email
+    /// content itself (e.g. a rich transactional email built by a separate
+    /// templating engine) and only needs the notification service to handle
+    /// delivery, rate-limiting, retries, and logging.
+    ///
+    /// # Interface contract
+    ///
+    /// ```json
+    /// {
+    ///   "body_override": {
+    ///     "subject":   "Your invoice #1234 is ready",
+    ///     "body_html": "<h1>Hi Alice,</h1><p>Your invoice is attached.</p>",
+    ///     "body_text": "Hi Alice, your invoice is attached."
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// All three fields are required when `body_override` is present.
+    /// An `event_type` value is still required (used for logging/metrics)
+    /// but does not need to correspond to a registered template.
+    #[serde(default)]
+    pub body_override: Option<BodyOverride>,
+}
+
+// ── Body override ─────────────────────────────────────────────────────────────
+
+/// Pre-rendered email body supplied directly by the publisher.
+///
+/// When set on [`EmailEvent`], the notification service skips template lookup
+/// and rendering and uses these values verbatim as the email content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BodyOverride {
+    /// Email subject line (plain text, no HTML).
+    pub subject: String,
+    /// Full HTML body of the email.
+    pub body_html: String,
+    /// Plain-text fallback body shown by clients that don't render HTML.
+    pub body_text: String,
 }
 
 // ── Attachment reference ──────────────────────────────────────────────────────

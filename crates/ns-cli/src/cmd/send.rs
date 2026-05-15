@@ -5,7 +5,7 @@
 
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
-use common::{AttachmentRef, EmailEvent, FromOverride, Recipient};
+use common::{AttachmentRef, BodyOverride, EmailEvent, FromOverride, Recipient};
 use dialoguer::Confirm;
 use lapin::{
     options::{BasicPublishOptions, ExchangeDeclareOptions},
@@ -79,6 +79,18 @@ pub async fn run(args: SendArgs, cfg: CliConfig) -> Result<()> {
     };
 
     // ── 6. Build event ────────────────────────────────────────────────────────
+
+    // Construct body_override when all three direct-body flags are present.
+    // clap's `requires` constraints ensure either all three are Some or all None.
+    let body_override = match (&args.subject, &args.body_html, &args.body_text) {
+        (Some(subject), Some(body_html), Some(body_text)) => Some(BodyOverride {
+            subject: subject.clone(),
+            body_html: body_html.clone(),
+            body_text: body_text.clone(),
+        }),
+        _ => None,
+    };
+
     let event_id = args.event_id.unwrap_or_else(Uuid::new_v4);
     let event = EmailEvent {
         event_id,
@@ -91,16 +103,23 @@ pub async fn run(args: SendArgs, cfg: CliConfig) -> Result<()> {
             source: Some(args.source.clone()),
         },
         attachments,
+        body_override,
     };
 
     // ── 7. Confirm ────────────────────────────────────────────────────────────
     if !args.yes {
         let to_str: Vec<&str> = recipients.iter().map(|r| r.email.as_str()).collect();
         println!("About to publish:");
-        println!("  Event type : {}", args.event_type);
-        println!("  Event ID   : {event_id}");
-        println!("  Recipients : {}", to_str.join(", "));
-        println!("  Attachments: {}", event.attachments.len());
+        println!("  Event type   : {}", args.event_type);
+        println!("  Event ID     : {event_id}");
+        println!("  Recipients   : {}", to_str.join(", "));
+        println!("  Attachments  : {}", event.attachments.len());
+        if event.body_override.is_some() {
+            println!("  Body mode    : direct (body_override — template bypassed)");
+            println!("  Subject      : {}", args.subject.as_deref().unwrap_or(""));
+        } else {
+            println!("  Body mode    : template");
+        }
 
         let ok = Confirm::new()
             .with_prompt("Publish this event?")

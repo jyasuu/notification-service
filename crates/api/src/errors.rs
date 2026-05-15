@@ -20,6 +20,13 @@ impl IntoResponse for ApiError {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::Duplicate(msg) => (StatusCode::CONFLICT, msg.clone()),
             AppError::Template(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg.clone()),
+            // Permanent mailer errors (prefixed "permanent:") represent a bad
+            // request that will never succeed — return 422 so callers know not
+            // to retry without fixing the underlying data.
+            AppError::Mailer(msg) if msg.starts_with("permanent:") => {
+                (StatusCode::UNPROCESSABLE_ENTITY, msg.clone())
+            }
+            AppError::Blocked(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
         };
 

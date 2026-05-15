@@ -1,37 +1,130 @@
-//! `ns template` — list, show, and flush email templates via the HTTP API.
+//! `ns template` — list, show, and flush email templates.
+//!
+//! * `list` and `show` query the `email_template` table directly (same as
+//!   `ns status` / `ns logs`) — they do not require the HTTP API to be running.
+//! * `flush` calls the HTTP API's DELETE cache endpoints, which do require a
+//!   running service.
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
+use reqwest::Client;
+use serde::Serialize;
+use sqlx::postgres::PgPoolOptions;
+use tabled::Tabled;
 
 use crate::{
-    cli::{TemplateAction, TemplateArgs},
+    cli::{OutputFormat, TemplateAction, TemplateArgs},
     config::CliConfig,
+    output,
 };
 
-pub async fn run(args: TemplateArgs, cfg: CliConfig) -> Result<()> {
-    let base_url = format!("http://localhost:{}", cfg.http.port);
-    let client = reqwest::Client::new();
+#[derive(Debug, Serialize, Tabled)]
+struct TemplateRow {
+    #[tabled(rename = "Type")]
+    event_type: String,
+    #[tabled(rename = "Subject")]
+    subject: String,
+    #[tabled(rename = "Version")]
+    version: i32,
+    #[tabled(rename = "Active")]
+    active: bool,
+    #[tabled(rename = "Updated")]
+    updated_at: String,
+}
 
+pub async fn run(args: TemplateArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<()> {
     match args.action {
+        // ── list: read email_template directly from the DB ────────────────────
         TemplateAction::List => {
-            let url = format!("{base_url}/templates");
-            let resp = client.get(&url).send().await?;
-            println!("{}", resp.text().await?);
+            let pool = PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&cfg.database.url)
+                .await
+                .context("Failed to connect to database")?;
+
+            let rows = sqlx::query!(
+                r#"SELECT type, subject, version, active, updated_at
+                   FROM   email_template
+                   ORDER  BY type"#
+            )
+            .fetch_all(&pool)
+            .await?;
+
+            if rows.is_empty() {
+                println!("(no templates in database)");
+                return Ok(());
+            }
+
+            let display: Vec<TemplateRow> = rows
+                .into_iter()
+                .map(|r| TemplateRow {
+                    event_type: r.r#type,
+                    subject: output::truncate(&r.subject, 50),
+                    version: r.version,
+                    active: r.active,
+                    updated_at: r.updated_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                })
+                .collect();
+
+            match fmt {
+                OutputFormat::Json => output::print_json(&display),
+                OutputFormat::Table => output::print_table(&display),
+            }
         }
 
+        // ── show: read one template row from the DB ───────────────────────────
         TemplateAction::Show { event_type } => {
-            let url = format!("{base_url}/templates/{event_type}");
-            let resp = client.get(&url).send().await?;
-            println!("{}", resp.text().await?);
+            let pool = PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&cfg.database.url)
+                .await
+                .context("Failed to connect to database")?;
+
+            let row = sqlx::query!(
+                r#"SELECT type, subject, body_html, body_text, version, active, updated_at
+                   FROM   email_template
+                   WHERE  type = $1"#,
+                event_type,
+            )
+            .fetch_optional(&pool)
+            .await?;
+
+            match row {
+                None => bail!("No template found for event type '{event_type}'"),
+                Some(r) => {
+                    println!("Type    : {}", r.r#type);
+                    println!("Version : {}  Active: {}", r.version, r.active);
+                    println!("Updated : {}", r.updated_at.format("%Y-%m-%d %H:%M:%S UTC"));
+                    println!();
+                    println!("Subject :\n{}\n", r.subject);
+                    println!("HTML body:\n{}\n", r.body_html);
+                    println!("Text body:\n{}", r.body_text);
+                }
+            }
         }
 
+        // ── flush: call the HTTP API's DELETE cache endpoint ──────────────────
         TemplateAction::Flush { event_type } => {
+            let base_url = cfg.api_base_url();
+            let client = Client::new();
+
             let url = match event_type {
                 Some(ref et) => format!("{base_url}/templates/{et}/cache"),
                 None => format!("{base_url}/templates/cache"),
             };
-            let resp = client.delete(&url).send().await?;
+
+            let mut req = client.delete(&url);
+            if let Some(key) = &cfg.http.api_key {
+                req = req.bearer_auth(key);
+            }
+
+            let resp = req.send().await.context("HTTP request failed")?;
             let status = resp.status();
-            println!("{status}  {}", resp.text().await.unwrap_or_default());
+            if status.is_success() {
+                println!("✓ Template cache flushed (HTTP {status})");
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                bail!("Flush failed (HTTP {status}): {body}");
+            }
         }
     }
 

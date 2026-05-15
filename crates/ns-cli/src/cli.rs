@@ -1,7 +1,17 @@
 //! Clap argument definitions for every subcommand.
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use uuid::Uuid;
+
+/// Output format for tabular commands.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum OutputFormat {
+    /// Human-readable table (default).
+    #[default]
+    Table,
+    /// Machine-readable JSON array.
+    Json,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -16,9 +26,9 @@ pub struct Cli {
     #[arg(long, short, global = true, env = "NS_CLI_CONFIG")]
     pub config: Option<String>,
 
-    /// Output format.
-    #[arg(long, short, global = true, default_value = "table", value_parser = ["table", "json"])]
-    pub output: String,
+    /// Output format (`table` or `json`).
+    #[arg(long, short, global = true, default_value = "table")]
+    pub output: OutputFormat,
 
     #[command(subcommand)]
     pub command: Command,
@@ -52,7 +62,12 @@ pub enum Command {
 
 #[derive(Debug, Args)]
 pub struct SendArgs {
-    /// Event type, e.g. ORDER_CONFIRMATION (must have a matching template).
+    /// Event type, e.g. ORDER_CONFIRMATION.
+    ///
+    /// When --subject / --body-html / --body-text are supplied, the event
+    /// type does NOT need to correspond to a registered template — it is
+    /// used only for logging and metrics.
+    /// When those flags are absent, a matching template must exist.
     #[arg(long, short = 't')]
     pub event_type: String,
 
@@ -68,6 +83,8 @@ pub struct SendArgs {
     /// Template payload as a JSON string or a path to a JSON file (prefix with @).
     ///   --payload '{"orderId":"123"}'
     ///   --payload @/path/to/payload.json
+    ///
+    /// Ignored when --subject / --body-html / --body-text are provided.
     #[arg(long, short, default_value = "{}")]
     pub payload: String,
 
@@ -96,6 +113,29 @@ pub struct SendArgs {
     /// Skip the confirmation prompt.
     #[arg(long, short = 'y')]
     pub yes: bool,
+
+    // ── Direct body override (optional) ─────────────────────────────────────
+    // When all three of --subject, --body-html, --body-text are given,
+    // the event is sent with a body_override and the registered template for
+    // --event-type is never consulted.
+    /// Email subject line (plain text).
+    ///
+    /// Must be provided together with --body-html and --body-text.
+    /// When all three are present, bypasses template lookup entirely.
+    #[arg(long, requires = "body_html", requires = "body_text")]
+    pub subject: Option<String>,
+
+    /// Full HTML body of the email.
+    ///
+    /// Must be provided together with --subject and --body-text.
+    #[arg(long, requires = "subject", requires = "body_text")]
+    pub body_html: Option<String>,
+
+    /// Plain-text fallback body of the email.
+    ///
+    /// Must be provided together with --subject and --body-html.
+    #[arg(long, requires = "subject", requires = "body_html")]
+    pub body_text: Option<String>,
 }
 
 // ── status ────────────────────────────────────────────────────────────────────

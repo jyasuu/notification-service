@@ -23,11 +23,19 @@ pub fn print_json<T: serde::Serialize>(value: &T) {
 }
 
 /// Truncate a string for display, appending "…" if it was cut.
+///
+/// `max` is a **character** count, not a byte count.  Slicing by raw byte
+/// index (`&s[..max]`) panics when `max` falls inside a multi-byte UTF-8
+/// sequence (e.g. CJK characters, accented letters, emoji in error messages
+/// or template payloads).
 pub fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_owned()
+    let mut chars = s.chars();
+    let truncated: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        // There were characters beyond `max` — append the ellipsis marker.
+        format!("{truncated}…")
     } else {
-        format!("{}…", &s[..max])
+        truncated
     }
 }
 

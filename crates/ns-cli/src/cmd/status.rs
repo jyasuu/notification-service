@@ -8,7 +8,11 @@ use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
 use tabled::Tabled;
 
-use crate::{cli::StatusArgs, config::CliConfig, output};
+use crate::{
+    cli::{OutputFormat, StatusArgs},
+    config::CliConfig,
+    output,
+};
 
 #[derive(Debug, Serialize, Tabled)]
 struct RecipientRow {
@@ -24,7 +28,7 @@ struct RecipientRow {
     updated_at: String,
 }
 
-pub async fn run(args: StatusArgs, cfg: CliConfig) -> Result<()> {
+pub async fn run(args: StatusArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<()> {
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .connect(&cfg.database.url)
@@ -52,7 +56,10 @@ pub async fn run(args: StatusArgs, cfg: CliConfig) -> Result<()> {
                     last_error: output::opt(&r.last_error),
                     updated_at: fmt_ts(Some(r.updated_at)),
                 }];
-                output::print_table(&rows);
+                match fmt {
+                    OutputFormat::Json => output::print_json(&rows),
+                    OutputFormat::Table => output::print_table(&rows),
+                }
             }
         }
     } else {
@@ -72,16 +79,17 @@ pub async fn run(args: StatusArgs, cfg: CliConfig) -> Result<()> {
             return Ok(());
         }
 
-        // Summary
-        let total = rows.len();
-        let sent = rows.iter().filter(|r| r.status == "SENT").count();
-        let failed = rows.iter().filter(|r| r.status == "FAILED").count();
-        let blocked = rows.iter().filter(|r| r.status == "BLOCKED").count();
-        let pending = rows.iter().filter(|r| r.status == "PENDING").count();
-
-        println!("Event: {}", args.event_id);
-        println!("Total: {total}  Sent: {sent}  Pending: {pending}  Failed: {failed}  Blocked: {blocked}");
-        println!();
+        // Summary (table mode only — JSON consumers can compute their own)
+        if matches!(fmt, OutputFormat::Table) {
+            let total = rows.len();
+            let sent = rows.iter().filter(|r| r.status == "SENT").count();
+            let failed = rows.iter().filter(|r| r.status == "FAILED").count();
+            let blocked = rows.iter().filter(|r| r.status == "BLOCKED").count();
+            let pending = rows.iter().filter(|r| r.status == "PENDING").count();
+            println!("Event: {}", args.event_id);
+            println!("Total: {total}  Sent: {sent}  Pending: {pending}  Failed: {failed}  Blocked: {blocked}");
+            println!();
+        }
 
         let display: Vec<RecipientRow> = rows
             .into_iter()
@@ -94,7 +102,10 @@ pub async fn run(args: StatusArgs, cfg: CliConfig) -> Result<()> {
             })
             .collect();
 
-        output::print_table(&display);
+        match fmt {
+            OutputFormat::Json => output::print_json(&display),
+            OutputFormat::Table => output::print_table(&display),
+        }
     }
 
     Ok(())

@@ -13,6 +13,11 @@ pub struct CliConfig {
     pub http: HttpConfig,
     /// Outbox DB URL — only needed for `ns outbox`.
     pub outbox_database_url: Option<String>,
+    /// Base URL of the running notification-service HTTP API.
+    /// Defaults to `http://localhost:<http.port>`.
+    /// Override with `NS__API_URL` or `api_url` in config/local.toml when
+    /// the service is not on the same host as the CLI (e.g. staging, k8s).
+    pub api_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -31,6 +36,20 @@ pub struct AmqpConfig {
 pub struct HttpConfig {
     pub port: u16,
     pub api_key: Option<String>,
+}
+
+impl CliConfig {
+    /// Base URL for the notification-service HTTP API.
+    ///
+    /// Returns `api_url` from config when set, otherwise falls back to
+    /// `http://localhost:<http.port>`.  All HTTP-calling commands (`retry`,
+    /// `template flush`, `health`) should use this instead of constructing
+    /// the URL themselves so the target host is consistent and configurable.
+    pub fn api_base_url(&self) -> String {
+        self.api_url
+            .clone()
+            .unwrap_or_else(|| format!("http://localhost:{}", self.http.port))
+    }
 }
 
 /// Load config from files + environment variables.

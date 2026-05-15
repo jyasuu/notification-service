@@ -88,29 +88,6 @@ pub fn templates_for(
     }
 }
 
-pub use template_store::TemplateStore;
-mod template_store {
-    use super::*;
-
-    /// In-memory template store.  
-    /// Phase 2: replace with a DB-backed store that loads from `email_template` table.
-    #[derive(Clone)]
-    pub struct TemplateStore;
-
-    impl TemplateStore {
-        pub fn new() -> Self {
-            Self
-        }
-
-        pub fn resolve(
-            &self,
-            event_type: &str,
-        ) -> Result<(&'static str, &'static str, &'static str), AppError> {
-            templates_for(event_type)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

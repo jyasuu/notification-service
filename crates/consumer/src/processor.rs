@@ -40,14 +40,47 @@ pub async fn process_recipient(
     recipient: &Recipient,
     attachments: &[ResolvedAttachment],
 ) -> RecipientOutcome {
+    // ── 0. Recipient email validation (before DB write) ─────────────────────
+    // Validate the recipient address structurally before inserting the PENDING
+    // row. An invalid address can never be sent to; failing here keeps the DB
+    // clean and surfaces the bug immediately instead of leaving a PENDING row
+    // that will always fail at the SMTP layer.
+    if !is_valid_email(&recipient.email) {
+        return RecipientOutcome::Failed(AppError::Mailer(format!(
+            "permanent: invalid recipient email address: {}",
+            recipient.email
+        )));
+    }
+
     // ── 1. Template lookup (before DB write) ────────────────────────────────
-    // Validate the template exists BEFORE inserting the PENDING row.  If we
-    // insert first and then discover an unknown event_type, the row is stuck
-    // PENDING forever (the idempotency guard skips it on every subsequent
-    // redelivery). Failing early keeps the DB clean and surfaces the bug fast.
-    let template = match template_store.resolve(&event.event_type).await {
-        Ok(t) => t,
-        Err(e) => return RecipientOutcome::Failed(e),
+    // Skip template resolution entirely when the publisher supplied a
+    // pre-rendered body via `body_override`.  We still validate that
+    // `body_override` fields are non-empty to surface misconfigured callers
+    // early, before inserting the PENDING row.
+    //
+    // When `body_override` is absent, resolve the template as normal and
+    // keep the result — it is reused in step 5 to avoid a second DB/cache
+    // round-trip for the same event_type within the same delivery attempt.
+    // Failing early (before insert_pending) keeps the DB clean and prevents
+    // PENDING rows that can never succeed.
+    let prefetched_template = if event.body_override.is_none() {
+        // Validate the template exists BEFORE inserting the PENDING row.  If we
+        // insert first and then discover an unknown event_type, the row is stuck
+        // PENDING forever (the idempotency guard skips it on every subsequent
+        // redelivery). Failing early keeps the DB clean and surfaces the bug fast.
+        match template_store.resolve(&event.event_type).await {
+            Ok(t) => Some(t),
+            Err(e) => return RecipientOutcome::Failed(e),
+        }
+    } else {
+        // Validate the override fields are non-empty before inserting the row.
+        let ov = event.body_override.as_ref().unwrap();
+        if ov.subject.is_empty() || ov.body_html.is_empty() || ov.body_text.is_empty() {
+            return RecipientOutcome::Failed(AppError::Mailer(
+                "permanent: body_override fields (subject, body_html, body_text) must all be non-empty".into(),
+            ));
+        }
+        None
     };
 
     // ── 2. from_override validation (before DB write) ───────────────────────
@@ -108,18 +141,33 @@ pub async fn process_recipient(
         return RecipientOutcome::Blocked(reason);
     }
 
-    // ── 4. Template rendering ────────────────────────────────────────────────
-    let (subject, body_html, body_text) = match (
-        render_template(&template.subject, &event.payload),
-        render_html_template(&template.body_html, &event.payload),
-        render_template(&template.body_text, &event.payload),
-    ) {
-        (Ok(s), Ok(h), Ok(t)) => (s, h, t),
-        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
-            let _ = store
-                .mark_failed(event.event_id, &recipient.email, &e.to_string(), true)
-                .await;
-            return RecipientOutcome::Failed(e);
+    // ── 5. Template rendering ────────────────────────────────────────────────
+    // When body_override is present, use its pre-rendered content verbatim.
+    // Otherwise use the template resolved (and kept) in step 1 — no second
+    // DB/cache round-trip needed.
+    let (subject, body_html, body_text) = if let Some(ov) = &event.body_override {
+        // body_override: skip DB lookup and {{placeholder}} rendering entirely.
+        // The fields were validated to be non-empty in step 1.
+        (
+            ov.subject.clone(),
+            ov.body_html.clone(),
+            ov.body_text.clone(),
+        )
+    } else {
+        // prefetched_template is Some when body_override is None (guaranteed by step 1).
+        let template = prefetched_template.expect("template was pre-fetched in step 1");
+        match (
+            render_template(&template.subject, &event.payload),
+            render_html_template(&template.body_html, &event.payload),
+            render_template(&template.body_text, &event.payload),
+        ) {
+            (Ok(s), Ok(h), Ok(t)) => (s, h, t),
+            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+                let _ = store
+                    .mark_failed(event.event_id, &recipient.email, &e.to_string(), true)
+                    .await;
+                return RecipientOutcome::Failed(e);
+            }
         }
     };
 
@@ -140,10 +188,10 @@ pub async fn process_recipient(
         attachments: attachments.to_vec(),
     };
 
-    // ── 5. Rate-limit token ──────────────────────────────────────────────────
+    // ── 6. Rate-limit token ──────────────────────────────────────────────────
     rate_limiter.wait_for_token().await;
 
-    // ── 6. Send ───────────────────────────────────────────────────────────────
+    // ── 7. Send ───────────────────────────────────────────────────────────────
     let send_start = std::time::Instant::now();
     match sender.send(&msg).await {
         Ok(()) => {

@@ -7,7 +7,11 @@ use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
 use tabled::Tabled;
 
-use crate::{cli::LogsArgs, config::CliConfig, output};
+use crate::{
+    cli::{LogsArgs, OutputFormat},
+    config::CliConfig,
+    output,
+};
 
 #[derive(Debug, Serialize, Tabled)]
 struct LogRow {
@@ -27,15 +31,13 @@ struct LogRow {
     updated_at: String,
 }
 
-pub async fn run(args: LogsArgs, cfg: CliConfig) -> Result<()> {
+pub async fn run(args: LogsArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<()> {
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .connect(&cfg.database.url)
         .await?;
 
     // Build a flexible query using ILIKE for partial matches.
-    // sqlx doesn't support fully dynamic WHERE clauses cleanly, so we use
-    // Option-based filters evaluated in-process after fetching with LIMIT.
     let status_filter = args.status.as_deref().unwrap_or("%");
     let type_filter = format!("%{}%", args.event_type.as_deref().unwrap_or(""));
     let email_filter = format!("%{}%", args.email.as_deref().unwrap_or(""));
@@ -81,6 +83,9 @@ pub async fn run(args: LogsArgs, cfg: CliConfig) -> Result<()> {
         })
         .collect();
 
-    output::print_table(&display);
+    match fmt {
+        OutputFormat::Json => output::print_json(&display),
+        OutputFormat::Table => output::print_table(&display),
+    }
     Ok(())
 }

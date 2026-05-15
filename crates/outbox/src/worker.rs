@@ -116,7 +116,13 @@ async fn connect_amqp_and_poll(
                 info!("Outbox worker: shutdown — stopping poll loop");
                 return Ok(());
             }
-            _ = poll_once(cfg, pool, &channel) => {}
+            result = poll_once(cfg, pool, &channel) => {
+                if let Err(e) = result {
+                    // AMQP channel is dead — surface the error so the outer
+                    // loop reconnects rather than continuing with a broken channel.
+                    return Err(e);
+                }
+            }
         }
 
         // Wait before next poll cycle.
@@ -129,7 +135,13 @@ async fn connect_amqp_and_poll(
 
 // ── Single poll cycle ─────────────────────────────────────────────────────────
 
-async fn poll_once(cfg: &OutboxConfig, pool: &PgPool, channel: &Channel) {
+/// Poll one batch of PENDING outbox rows and publish them to RabbitMQ.
+///
+/// Returns `Err` if the AMQP channel is broken so `connect_amqp_and_poll`
+/// can reconnect immediately rather than continuing to hammer a dead channel
+/// for every remaining row in the batch.  Database errors are logged and
+/// treated as transient (the next poll cycle will retry them).
+async fn poll_once(cfg: &OutboxConfig, pool: &PgPool, channel: &Channel) -> anyhow::Result<()> {
     match fetch_pending_batch(pool, cfg.batch_size).await {
         Ok(rows) if rows.is_empty() => {
             // Nothing to do this cycle.
@@ -150,14 +162,23 @@ async fn poll_once(cfg: &OutboxConfig, pool: &PgPool, channel: &Channel) {
                         {
                             error!(event_id = %row.event_id, error = %e2, "Could not record publish failure");
                         }
+                        // If the channel is no longer connected, propagate the
+                        // error so connect_amqp_and_poll reconnects.  Otherwise
+                        // keep going — the failure was row-specific (e.g. a
+                        // serialization error) and the channel is still healthy.
+                        if !channel.status().connected() {
+                            return Err(e);
+                        }
                     }
                 }
             }
         }
         Err(e) => {
             error!(error = %e, "Outbox: failed to fetch batch");
+            // DB errors are transient — don't abort the AMQP connection.
         }
     }
+    Ok(())
 }
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
