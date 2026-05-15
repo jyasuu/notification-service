@@ -138,11 +138,19 @@ async fn main() -> anyhow::Result<()> {
 
     let api_shutdown = shutdown.clone();
     let api_task = tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-        axum::serve(listener, router)
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(error = %e, addr = %addr, "Failed to bind HTTP listener");
+                return;
+            }
+        };
+        if let Err(e) = axum::serve(listener, router)
             .with_graceful_shutdown(async move { api_shutdown.cancelled().await })
             .await
-            .unwrap();
+        {
+            tracing::error!(error = %e, "HTTP server exited with error");
+        }
     });
 
     // ── AMQP consumer ─────────────────────────────────────────────────────────

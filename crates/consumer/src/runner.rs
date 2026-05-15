@@ -81,7 +81,7 @@ pub async fn run_consumer(
 }
 
 // ── One connection lifetime ───────────────────────────────────────────────────
-
+#[allow(clippy::too_many_arguments)]
 async fn connect_and_consume(
     cfg: &ConsumerConfig,
     store: EmailLogStore,
@@ -183,6 +183,7 @@ async fn connect_and_consume(
 /// For automated recovery, operators can poll `GET /emails/{event_id}` and
 /// trigger the retry endpoint when `summary.failed > 0`, or set up an alert
 /// on the `emails_failed_total` Prometheus metric and the DLQ queue depth.
+#[allow(clippy::too_many_arguments)]
 async fn handle_delivery(
     delivery: lapin::message::Delivery,
     store: EmailLogStore,
@@ -267,6 +268,7 @@ async fn handle_delivery(
 }
 
 /// Drive one recipient through the send loop with per-recipient retry.
+#[allow(clippy::too_many_arguments)]
 async fn process_one_recipient(
     store: &EmailLogStore,
     template_store: &TemplateStore,

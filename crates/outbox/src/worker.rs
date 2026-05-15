@@ -23,7 +23,7 @@ use crate::OutboxConfig;
 //       event_type   TEXT        NOT NULL,
 //       payload      JSONB       NOT NULL,
 //       status       TEXT        NOT NULL DEFAULT 'PENDING'
-//                                CHECK (status IN ('PENDING', 'PUBLISHED', 'FAILED')),
+//                                CHECK (status IN ('PENDING', 'IN_PROGRESS', 'PUBLISHED', 'FAILED')),
 //       fail_count   INT         NOT NULL DEFAULT 0,
 //       created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
 //       published_at TIMESTAMPTZ
@@ -120,6 +120,7 @@ async fn connect_amqp_and_poll(
                 if let Err(e) = result {
                     // AMQP channel is dead — surface the error so the outer
                     // loop reconnects rather than continuing with a broken channel.
+                    error!(error = %e, "Outbox worker: Failed poll_once");
                     return Err(e);
                 }
             }
@@ -191,7 +192,14 @@ struct OutboxRow {
 }
 
 async fn fetch_pending_batch(pool: &PgPool, limit: i64) -> anyhow::Result<Vec<OutboxRow>> {
-    // SELECT … FOR UPDATE SKIP LOCKED — safe for multiple concurrent workers.
+    // SELECT … FOR UPDATE SKIP LOCKED must run inside an explicit transaction.
+    // Without a transaction the row-level locks are released immediately after
+    // the SELECT, defeating the purpose of SKIP LOCKED and allowing two workers
+    // racing on the same batch to pick up the same rows.
+    //
+    // We also immediately flip matched rows to IN_PROGRESS inside the same txn
+    // so that even after the transaction commits no other worker can re-select them.
+    let mut tx = pool.begin().await?;
     let rows = sqlx::query!(
         r#"
         SELECT id, event_id, event_type, payload
@@ -203,8 +211,19 @@ async fn fetch_pending_batch(pool: &PgPool, limit: i64) -> anyhow::Result<Vec<Ou
         "#,
         limit,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
+
+    if !rows.is_empty() {
+        let ids: Vec<uuid::Uuid> = rows.iter().map(|r| r.id).collect();
+        sqlx::query!(
+            "UPDATE outbox SET status = 'IN_PROGRESS' WHERE id = ANY($1) AND status = 'PENDING'",
+            &ids,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
 
     Ok(rows
         .into_iter()
@@ -274,12 +293,12 @@ async fn publish_and_mark(
         .await?
         .await?; // wait for broker confirm
 
-    // Mark as PUBLISHED — atomic so duplicates can't slip through.
+    // Mark as PUBLISHED — uses IN_PROGRESS guard so only this worker can flip it.
     sqlx::query!(
         r#"
         UPDATE outbox
         SET    status = 'PUBLISHED', published_at = now()
-        WHERE  id = $1 AND status = 'PENDING'
+        WHERE  id = $1 AND status = 'IN_PROGRESS'
         "#,
         row.id,
     )
@@ -292,16 +311,21 @@ async fn publish_and_mark(
 
 // ── Publish failure tracking ──────────────────────────────────────────────────
 
-/// Increment the fail_count for an outbox row.
-/// When fail_count reaches max_failures, mark the row as FAILED so it stops
-/// being polled. This prevents a permanently-broken event from blocking the
-/// outbox indefinitely.
+/// Record a publish failure for an outbox row and reset it back to PENDING so
+/// it is retried on the next poll cycle.
+///
+/// When `fail_count` reaches `max_failures` the row is permanently marked
+/// FAILED instead, preventing a broken event from blocking the outbox forever.
+///
+/// Transitions from IN_PROGRESS → PENDING (or FAILED), which is necessary
+/// because `fetch_pending_batch` now sets rows to IN_PROGRESS atomically;
+/// leaving them IN_PROGRESS after a failure would strand them forever.
 async fn record_publish_failure(pool: &PgPool, id: Uuid, max_failures: i32) -> anyhow::Result<()> {
     sqlx::query!(
         r#"
         UPDATE outbox
         SET    fail_count = fail_count + 1,
-               status     = CASE WHEN fail_count + 1 >= $2 THEN 'FAILED' ELSE status END
+               status     = CASE WHEN fail_count + 1 >= $2 THEN 'FAILED' ELSE 'PENDING' END
         WHERE  id = $1
         "#,
         id,

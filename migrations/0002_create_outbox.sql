@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS outbox (
     payload      JSONB       NOT NULL,
 
     status       TEXT        NOT NULL DEFAULT 'PENDING'
-                             CHECK (status IN ('PENDING', 'PUBLISHED', 'FAILED')),
+                             CHECK (status IN ('PENDING', 'IN_PROGRESS', 'PUBLISHED', 'FAILED')),
 
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     published_at TIMESTAMPTZ

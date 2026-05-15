@@ -30,6 +30,7 @@ pub enum RecipientOutcome {
 /// whether to retry on `Failed`.
 #[instrument(skip(store, template_store, sender, filter, rate_limiter, event, recipient, attachments),
              fields(event_id = %event.event_id, email = %recipient.email))]
+#[allow(clippy::too_many_arguments)]
 pub async fn process_recipient(
     store: &EmailLogStore,
     template_store: &TemplateStore,
@@ -63,24 +64,25 @@ pub async fn process_recipient(
     // round-trip for the same event_type within the same delivery attempt.
     // Failing early (before insert_pending) keeps the DB clean and prevents
     // PENDING rows that can never succeed.
-    let prefetched_template = if event.body_override.is_none() {
-        // Validate the template exists BEFORE inserting the PENDING row.  If we
-        // insert first and then discover an unknown event_type, the row is stuck
-        // PENDING forever (the idempotency guard skips it on every subsequent
-        // redelivery). Failing early keeps the DB clean and surfaces the bug fast.
-        match template_store.resolve(&event.event_type).await {
-            Ok(t) => Some(t),
-            Err(e) => return RecipientOutcome::Failed(e),
-        }
-    } else {
-        // Validate the override fields are non-empty before inserting the row.
-        let ov = event.body_override.as_ref().unwrap();
+    let prefetched_template = if let Some(ov) = event.body_override.as_ref() {
+        // body_override present: validate fields are non-empty before inserting the row.
+        // Failing early keeps the DB clean and surfaces misconfigured callers before
+        // inserting a PENDING row that can never succeed.
         if ov.subject.is_empty() || ov.body_html.is_empty() || ov.body_text.is_empty() {
             return RecipientOutcome::Failed(AppError::Mailer(
                 "permanent: body_override fields (subject, body_html, body_text) must all be non-empty".into(),
             ));
         }
         None
+    } else {
+        // No body_override: validate the template exists BEFORE inserting the PENDING row.
+        // If we insert first and then discover an unknown event_type, the row is stuck
+        // PENDING forever (the idempotency guard skips it on every subsequent
+        // redelivery). Failing early keeps the DB clean and surfaces the bug fast.
+        match template_store.resolve(&event.event_type).await {
+            Ok(t) => Some(t),
+            Err(e) => return RecipientOutcome::Failed(e),
+        }
     };
 
     // ── 2. from_override validation (before DB write) ───────────────────────
@@ -143,19 +145,21 @@ pub async fn process_recipient(
 
     // ── 5. Template rendering ────────────────────────────────────────────────
     // When body_override is present, use its pre-rendered content verbatim.
-    // Otherwise use the template resolved (and kept) in step 1 — no second
-    // DB/cache round-trip needed.
+    // Otherwise use the template resolved (and kept) in the prefetch block above —
+    // no second DB/cache round-trip needed.
     let (subject, body_html, body_text) = if let Some(ov) = &event.body_override {
         // body_override: skip DB lookup and {{placeholder}} rendering entirely.
-        // The fields were validated to be non-empty in step 1.
+        // The fields were validated to be non-empty in the prefetch block above.
         (
             ov.subject.clone(),
             ov.body_html.clone(),
             ov.body_text.clone(),
         )
     } else {
-        // prefetched_template is Some when body_override is None (guaranteed by step 1).
-        let template = prefetched_template.expect("template was pre-fetched in step 1");
+        // prefetched_template is Some when body_override is None (guaranteed by
+        // the prefetch block above which sets Some(t) on the else branch).
+        let template = prefetched_template
+            .expect("template must have been pre-fetched when body_override is absent");
         match (
             render_template(&template.subject, &event.payload),
             render_html_template(&template.body_html, &event.payload),

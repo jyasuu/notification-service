@@ -22,6 +22,7 @@ impl EmailLogStore {
     /// `payload`, `from_override`, and `attachments` are stored for retry
     /// reconstruction so the full original event can be re-published on manual retry.
     /// `recipient_name` is stored so the display name survives retries.
+    #[allow(clippy::too_many_arguments)]
     #[instrument(skip(self, payload, from_override, attachments))]
     pub async fn insert_pending(
         &self,
@@ -249,8 +250,9 @@ fn parse_status(s: &str) -> EmailStatus {
         other => {
             tracing::error!(
                 status = other,
-                "Unrecognised email_log.status value — defaulting to Pending. \
-                 This indicates a missing code update after a schema migration."
+                "Unrecognised email_log.status value '{}' — defaulting to Pending. \
+                 This indicates a missing code update after a schema migration.",
+                other
             );
             EmailStatus::Pending
         }

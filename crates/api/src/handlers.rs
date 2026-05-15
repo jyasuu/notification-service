@@ -131,11 +131,7 @@ async fn republish_event(state: &ApiState, event_id: Uuid) -> Result<(), ApiErro
     });
     let body =
         serde_json::to_vec(&envelope).map_err(|e| ApiError(AppError::Queue(e.to_string())))?;
-    state
-        .publisher
-        .publish(body)
-        .await
-        .map_err(|e| ApiError(e))?;
+    state.publisher.publish(body).await.map_err(ApiError)?;
     Ok(())
 }
 

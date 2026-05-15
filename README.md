@@ -48,10 +48,10 @@ Config is loaded from `config/default.toml` then `config/local.toml`,
 with environment variable overrides using the `NS__` prefix and `__` separator:
 
 ```bash
-NS_DATABASE__URL="postgres://..."
-NS_AMQP__URL="amqp://..."
-NS_MAILER__BACKEND="webhook"
-NS_MAILER__URL="https://hooks.example.com/email"
+NS__DATABASE__URL="postgres://..."
+NS__AMQP__URL="amqp://..."
+NS__MAILER__BACKEND="webhook"
+NS__MAILER__URL="https://hooks.example.com/email"
 ```
 
 ## Email backends
