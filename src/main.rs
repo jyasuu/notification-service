@@ -61,6 +61,11 @@ async fn main() -> anyhow::Result<()> {
     // ── Database ──────────────────────────────────────────────────────────────
     let pool = PgPoolOptions::new()
         .max_connections(cfg.database.pool_size)
+        // Fail fast when the pool is saturated rather than blocking indefinitely.
+        // A 5-second timeout surfaces as a retryable AppError::Database, which
+        // the consumer will back off and retry — much better than a stalled task
+        // holding a semaphore permit and an un-ACK'd AMQP message.
+        .acquire_timeout(std::time::Duration::from_secs(5))
         .connect(&cfg.database.url)
         .await
         .context("Failed to connect to PostgreSQL")?;

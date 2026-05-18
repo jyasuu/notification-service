@@ -11,6 +11,7 @@ use recipient_filter::RecipientFilter;
 use reqwest::Client;
 use store::{EmailLogStore, TemplateStore};
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -104,7 +105,20 @@ async fn connect_and_consume(
     http: Arc<Client>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
-    let conn = Connection::connect(&cfg.amqp_url, ConnectionProperties::default()).await?;
+    // ── AMQP heartbeat ────────────────────────────────────────────────────────
+    // RabbitMQ 3.12+ enforces a server-side consumer_timeout (default 30 min).
+    // A recipient undergoing repeated transient-failure backoffs can hold an
+    // un-ACK'd message for many minutes; without heartbeats the broker sees a
+    // silent connection and may cancel the consumer or close the channel.
+    //
+    // Heartbeat is negotiated during the AMQP Connection.Tune handshake.
+    // The broker picks min(client, server); 60 s matches the RabbitMQ default
+    // so this is effectively a no-op against a stock broker and a safety net
+    // against one configured with a higher value.  Appending to the URI keeps
+    // the approach compatible with lapin 2.x without additional dependencies.
+    let amqp_url_with_heartbeat = append_heartbeat_param(&cfg.amqp_url, 60);
+    let conn =
+        Connection::connect(&amqp_url_with_heartbeat, ConnectionProperties::default()).await?;
     let channel = conn.create_channel().await?;
     declare_topology(&channel, cfg).await?;
 
@@ -153,12 +167,19 @@ async fn connect_and_consume(
 /// Handle one delivery.
 ///
 /// Attachments are fetched ONCE here at the event level, then the resolved
-/// bytes are passed to every recipient.  This prevents N×M HTTP GETs and
-/// pre-signed URL expiry for recipients processed later in the loop.
+/// bytes are passed to every recipient task.  This prevents N×M HTTP GETs
+/// and pre-signed URL expiry for recipients processed later in the list.
 ///
-/// The AMQP message is ACK'd once ALL recipients are resolved.
-/// It is NACK'd (→ DLQ) only if the message itself cannot be deserialized
-/// or if the event-level attachment fetch fails permanently.
+/// Recipients are processed **in parallel** via a `JoinSet`: each recipient
+/// gets its own task with its own retry loop.  The semaphore permit is held
+/// for the entire delivery so total in-flight messages stays bounded, but
+/// within a message recipients no longer block each other — a long retry
+/// backoff on one address does not delay sends to other addresses in the
+/// same event.
+///
+/// The AMQP message is ACK'd once ALL recipient tasks have finished.
+/// It is NACK'd (→ DLQ) only if the message cannot be deserialized or if
+/// the event-level attachment fetch fails permanently.
 async fn handle_delivery(
     delivery: lapin::message::Delivery,
     ctx: ProcessorContext,
@@ -207,7 +228,7 @@ async fn handle_delivery(
 
     // ── Fetch attachments once for the whole event ───────────────────────────
     // Attachment bytes are held in memory for the lifetime of this handler
-    // (until all recipients are processed). Peak memory per event is therefore:
+    // (until all recipient tasks complete). Peak memory per event is:
     //   num_attachments × max_attachment_bytes (default: 10 MiB each).
     // With max_concurrency concurrent handlers this becomes:
     //   max_concurrency × num_attachments × max_attachment_bytes.
@@ -243,17 +264,41 @@ async fn handle_delivery(
         }
     };
 
-    // Process every recipient independently.
-    for recipient in &event.recipients {
-        process_one_recipient(
-            &ctx,
-            &event,
-            recipient,
-            &resolved_attachments,
-            &cfg,
-            &shutdown,
-        )
-        .await;
+    // ── Process all recipients in parallel ───────────────────────────────────
+    // Each recipient gets its own task so a long retry backoff for one address
+    // does not delay sends to other addresses in the same event.
+    //
+    // `resolved_attachments` is wrapped in an Arc so every task can hold a
+    // cheap reference to the shared bytes rather than cloning the full payload
+    // (which could be tens of MiB when attachments are present).
+    let attachments = Arc::new(resolved_attachments);
+
+    let mut join_set = JoinSet::new();
+    for recipient in event.recipients.clone() {
+        let ctx = ctx.clone();
+        let event = event.clone();
+        let atts = Arc::clone(&attachments);
+        let cfg = cfg.clone();
+        let shutdown = shutdown.clone();
+
+        join_set.spawn(async move {
+            process_one_recipient(&ctx, &event, &recipient, &atts, &cfg, &shutdown).await;
+        });
+    }
+
+    // Wait for every recipient task to finish (success, permanent failure, or
+    // max retries exhausted) before ACKing the message.  Task panics are
+    // treated as permanent failures for that recipient — the join error is
+    // logged but does not prevent the ACK, since other recipients may have
+    // delivered successfully and we must not re-process them.
+    while let Some(result) = join_set.join_next().await {
+        if let Err(e) = result {
+            error!(
+                event_id = %event.event_id,
+                error    = %e,
+                "Recipient task panicked — treating as permanent failure"
+            );
+        }
     }
 
     let _ = delivery.ack(BasicAckOptions::default()).await;
@@ -412,6 +457,57 @@ async fn process_one_recipient(
                 }
             }
         }
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Append `?heartbeat=<secs>` to an AMQP URL if not already present.
+///
+/// The heartbeat is negotiated during the AMQP `Connection.Tune` handshake:
+/// the broker picks `min(client, server)` so this value is a ceiling, not a
+/// floor.  Setting it ensures a heartbeat IS negotiated even if the broker's
+/// default is 0 (disabled) or very high.
+///
+/// If the URL already contains a `heartbeat` query parameter it is left
+/// untouched — the operator's explicit value takes precedence.
+fn append_heartbeat_param(url: &str, heartbeat_secs: u16) -> String {
+    if url.contains("heartbeat=") {
+        return url.to_owned();
+    }
+    if url.contains('?') {
+        format!("{url}&heartbeat={heartbeat_secs}")
+    } else {
+        format!("{url}?heartbeat={heartbeat_secs}")
+    }
+}
+
+#[cfg(test)]
+mod heartbeat_tests {
+    use super::append_heartbeat_param;
+
+    #[test]
+    fn appends_to_plain_url() {
+        let url = "amqp://guest:guest@localhost:5672";
+        assert_eq!(
+            append_heartbeat_param(url, 60),
+            "amqp://guest:guest@localhost:5672?heartbeat=60"
+        );
+    }
+
+    #[test]
+    fn appends_to_url_with_existing_query() {
+        let url = "amqp://guest:guest@localhost:5672/%2f?connection_timeout=10000";
+        assert_eq!(
+            append_heartbeat_param(url, 60),
+            "amqp://guest:guest@localhost:5672/%2f?connection_timeout=10000&heartbeat=60"
+        );
+    }
+
+    #[test]
+    fn leaves_existing_heartbeat_untouched() {
+        let url = "amqp://guest:guest@localhost:5672?heartbeat=30";
+        assert_eq!(append_heartbeat_param(url, 60), url);
     }
 }
 
