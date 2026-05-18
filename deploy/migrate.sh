@@ -6,7 +6,7 @@
 # starts. Exits non-zero on any failure so dependent services won't start.
 #
 # Required env vars:
-#   NOTIFICATION_DATABASE_URL — notification service DB
+#   ANVIL_DATABASE_URL — anvil-notify DB
 #   BUSINESS_DATABASE_URL     — business service DB (outbox table lives here)
 
 set -e
@@ -14,14 +14,14 @@ set -e
 echo "[migrate] Starting migration runner"
 
 # ── Notification DB ───────────────────────────────────────────────────────────
-if [ -z "$NOTIFICATION_DATABASE_URL" ]; then
-  echo "[migrate] ERROR: NOTIFICATION_DATABASE_URL is not set"
+if [ -z "$ANVIL_DATABASE_URL" ]; then
+  echo "[migrate] ERROR: ANVIL_DATABASE_URL is not set"
   exit 1
 fi
 
 echo "[migrate] Running notification DB migrations..."
 sqlx migrate run \
-  --database-url "$NOTIFICATION_DATABASE_URL" \
+  --database-url "$ANVIL_DATABASE_URL" \
   --source /migrations
 echo "[migrate] Notification DB migrations complete"
 

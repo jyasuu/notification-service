@@ -53,9 +53,9 @@ mod processor_tests {
                 .lock()
                 .unwrap()
                 .pop()
-                // pop() takes from the end — reverse the slice so the first
-                // element is consumed first (push order).  We reverse at
-                // construction; see the helper below.
+                // pop() takes from the end. The `mock_sender` helper reverses
+                // the slice before calling `new()`, so the first element
+                // provided by the caller is consumed first.
                 .expect("MockSender: unexpected extra send() call")
         }
     }
@@ -97,7 +97,6 @@ mod processor_tests {
             from_override: None,
             metadata: Default::default(),
             attachments: vec![],
-            body_override: None,
         }
     }
 

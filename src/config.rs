@@ -85,6 +85,10 @@ fn default_max_rl_waits() -> u32 {
     5
 }
 
+fn default_max_recipients_per_event() -> usize {
+    500
+}
+
 fn default_template_cache_ttl_secs() -> u64 {
     300
 }
@@ -98,7 +102,7 @@ pub struct DatabaseConfig {
     pub url: String,
     /// Maximum number of connections in the PostgreSQL connection pool.
     /// Default: 10. Tune based on your Postgres `max_connections` setting
-    /// and the number of notification-service replicas.
+    /// and the number of anvil-notify replicas.
     #[serde(default = "default_db_pool_size")]
     pub pool_size: u32,
 }
@@ -120,6 +124,10 @@ pub struct AmqpConfig {
     /// Maximum consecutive rate-limit backoff cycles per recipient (default: 5).
     #[serde(default = "default_max_rl_waits")]
     pub max_rl_waits: u32,
+    /// Hard cap on the number of recipients allowed per AMQP event message.
+    /// Events exceeding this are NACKed to the DLQ. Default: 500.
+    #[serde(default = "default_max_recipients_per_event")]
+    pub max_recipients_per_event: usize,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -127,7 +135,7 @@ pub struct HttpConfig {
     pub port: u16,
     /// When set, all `/emails/*` endpoints require `Authorization: Bearer <api_key>`.
     /// Leave unset only when the API is isolated behind a private network.
-    /// Override via `NS_HTTP__API_KEY` environment variable.
+    /// Override via `AN__HTTP__API_KEY` environment variable.
     pub api_key: Option<String>,
 }
 
@@ -184,7 +192,7 @@ impl AppConfig {
             .set_default("http.port", 8080)?
             .set_default("metrics_port", 9091)?
             .set_default("amqp.queue", "email.requested")?
-            .set_default("amqp.exchange", "notifications")?
+            .set_default("amqp.exchange", "anvil-notify")?
             .set_default("amqp.routing_key", "email.requested")?
             .set_default("amqp.max_retries", 3)?
             .set_default("amqp.retry_base_ms", 1000)?
@@ -192,8 +200,8 @@ impl AppConfig {
             // File-based config (optional)
             .add_source(config::File::with_name("config/default").required(false))
             .add_source(config::File::with_name("config/local").required(false))
-            // Environment overrides: NS_DATABASE__URL, NS_AMQP__URL, etc.
-            .add_source(config::Environment::with_prefix("NS").separator("__"))
+            // Environment overrides: AN__DATABASE__URL, AN__AMQP__URL, etc.
+            .add_source(config::Environment::with_prefix("AN").separator("__"))
             .build()?;
 
         let app: Self = cfg.try_deserialize()?;
@@ -233,6 +241,16 @@ impl AppConfig {
                     bail!("mailer.url must start with http:// or https://");
                 }
             }
+        }
+
+        if self.amqp.max_concurrency == 0 || self.amqp.max_concurrency > 1_000 {
+            bail!(
+                "amqp.max_concurrency must be between 1 and 1000, got {}",
+                self.amqp.max_concurrency
+            );
+        }
+        if self.amqp.max_recipients_per_event == 0 {
+            bail!("amqp.max_recipients_per_event must be at least 1");
         }
 
         // Validate every named sender account at startup so a typo in the

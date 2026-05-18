@@ -40,13 +40,13 @@ async-trait = "0.1"
 tokio-util = { version = "0.7" }
 
 [package]
-name = "notification-service"
+name = "anvil-notify"
 version = "0.1.0"
 edition = "2021"
 
 # ── Binaries ──────────────────────────────────────────────────────────────────
 [[bin]]
-name = "notification-service"
+name = "anvil-notify"
 path = "src/main.rs"
 
 [[bin]]

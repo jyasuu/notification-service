@@ -1,6 +1,6 @@
-//! ns — notification-service CLI
+//! ns — anvil-notify CLI
 //!
-//! A full operations tool for the notification-service.
+//! A full operations tool for the anvil-notify.
 //! Connects directly to RabbitMQ and PostgreSQL (same config as the service)
 //! or to the running HTTP API, depending on the subcommand.
 //!

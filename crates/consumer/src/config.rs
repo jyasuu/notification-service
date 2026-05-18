@@ -26,6 +26,16 @@ pub struct ConsumerConfig {
     /// rate-limit hold time before giving up.  Increase for providers with
     /// very long cooldown windows; decrease to fail fast during outages.
     pub max_rl_waits: u32,
+    /// Hard cap on recipients per AMQP message.
+    ///
+    /// A single event with thousands of recipients would hold a semaphore permit
+    /// and many DB connections for an arbitrarily long time. Events that exceed
+    /// this limit are immediately NACK'd to the DLQ so an operator can inspect
+    /// them rather than letting them monopolise the worker.
+    ///
+    /// Default: 500. Raise for bulk-mailing use cases; lower for latency-sensitive
+    /// transactional mail where a runaway event should fail fast.
+    pub max_recipients_per_event: usize,
 }
 
 impl Default for ConsumerConfig {
@@ -33,13 +43,14 @@ impl Default for ConsumerConfig {
         Self {
             amqp_url: "amqp://guest:guest@localhost:5672".into(),
             queue: "email.requested".into(),
-            exchange: "notifications".into(),
+            exchange: "anvil-notify".into(),
             routing_key: "email.requested".into(),
             max_retries: 3,
             retry_base_ms: 1_000,
             max_concurrency: 10,
             max_attachment_bytes: 10 * 1024 * 1024,
             max_rl_waits: 5,
+            max_recipients_per_event: 500,
         }
     }
 }

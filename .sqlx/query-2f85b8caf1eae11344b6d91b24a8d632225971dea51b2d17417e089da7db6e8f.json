@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE outbox\n        SET    fail_count = fail_count + 1,\n               locked_at  = NULL,\n               status     = CASE WHEN fail_count + 1 >= $2 THEN 'FAILED' ELSE 'PENDING' END\n        WHERE  id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2f85b8caf1eae11344b6d91b24a8d632225971dea51b2d17417e089da7db6e8f"
+}

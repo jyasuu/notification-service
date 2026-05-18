@@ -1,4 +1,4 @@
-# notification-service
+# AnvilNotify
 
 A production-grade Rust microservice implementing the **Transactional Outbox + Notification Service** pattern.
 
@@ -10,7 +10,7 @@ A production-grade Rust microservice implementing the **Transactional Outbox + N
         ↓
 [Outbox Worker]  (external, publishes to RabbitMQ)
         ↓
-[notification-service]  ← this repo
+[anvil-notify]  ← this repo
   ├── AMQP consumer  (lapin)     — receives EmailEvent messages
   ├── Idempotency    (sqlx/pg)   — deduplicates by event_id
   ├── Template engine            — renders subject/body
@@ -45,13 +45,13 @@ cargo run
 ## Configuration
 
 Config is loaded from `config/default.toml` then `config/local.toml`,
-with environment variable overrides using the `NS__` prefix and `__` separator:
+with environment variable overrides using the `AN__` prefix and `__` separator:
 
 ```bash
-NS__DATABASE__URL="postgres://..."
-NS__AMQP__URL="amqp://..."
-NS__MAILER__BACKEND="webhook"
-NS__MAILER__URL="https://hooks.example.com/email"
+AN__DATABASE__URL="postgres://..."
+AN__AMQP__URL="amqp://..."
+AN__MAILER__BACKEND="webhook"
+AN__MAILER__URL="https://hooks.example.com/email"
 ```
 
 ## Email backends
@@ -115,7 +115,7 @@ auth_token = "bearer-token"  # optional
 | > 3     | → DLX   |
 
 Messages that exhaust retries are routed to `email.requested.dlq` via the
-`notifications.dlx` dead-letter exchange.
+`anvil-notify.dlx` dead-letter exchange.
 
 ### Attachment URL expiry sizing
 
@@ -187,4 +187,25 @@ psql "$BUSINESS_DATABASE_URL" -f migrations/business_db/0002_create_outbox.sql
 psql "$BUSINESS_DATABASE_URL" -f migrations/business_db/0005_outbox_from_override.sql
 psql "$BUSINESS_DATABASE_URL" -f migrations/business_db/0006_outbox_fail_count.sql
 psql "$BUSINESS_DATABASE_URL" -f migrations/business_db/0008_outbox_attachments.sql
+psql "$BUSINESS_DATABASE_URL" -f migrations/business_db/0016_outbox_locked_at.sql
 ```
+
+## Known limitations
+
+### Internationalized email addresses (IDN / EAI)
+
+The built-in email validator (`crates/common/src/email_validation.rs`) accepts
+only ASCII characters in both the local part and the domain. Addresses with
+non-ASCII characters — such as `用户@例子.广告` or `üser@münchen.de` — are
+rejected before delivery is attempted.
+
+This is intentional: most SMTP relays and transactional providers do not
+support [RFC 6531 (SMTPUTF8)](https://datatracker.ietf.org/doc/html/rfc6531)
+and would reject such addresses at the protocol level anyway.
+
+If your user base requires internationalized addresses, the domain portion can
+be handled today by converting it to its Punycode representation
+(`münchen.de` → `xn--mnchen-3ya.de`) before publishing the event. Full
+SMTPUTF8 local-part support would require replacing the validator with an
+[`idna`](https://crates.io/crates/idna)-aware implementation and confirming
+your SMTP provider supports it.

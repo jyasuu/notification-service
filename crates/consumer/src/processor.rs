@@ -7,7 +7,7 @@ use mailer::{render_html_template, render_template, EmailMessage, EmailSender, S
 use metrics::{counter, histogram};
 use rate_limiter::MailRateLimiter;
 use recipient_filter::RecipientFilter;
-use store::{EmailLogStore, TemplateStore};
+use store::{EmailLogStore, InsertResult, TemplateStore};
 use tracing::{info, instrument, warn};
 
 /// Shared, cheaply-cloneable context passed to every per-recipient processor call.
@@ -31,7 +31,14 @@ pub struct ProcessorContext {
 pub enum RecipientOutcome {
     Sent,
     Blocked(String),
-    Skipped,          // duplicate — already processed
+    /// Recipient is already in a terminal state (SENT or BLOCKED) — skip.
+    Skipped,
+    /// Row already exists and is non-terminal; carries the current DB
+    /// `retry_count` so the runner can seed its in-memory attempt counter
+    /// without a second round-trip.  The runner should continue retrying.
+    Duplicate {
+        retry_count: i32,
+    },
     Failed(AppError), // transient or permanent — handled by runner
 }
 
@@ -44,13 +51,14 @@ pub enum RecipientOutcome {
 ///
 /// Returns the outcome for this recipient. The caller (runner) decides
 /// whether to retry on `Failed`.
-#[instrument(skip(ctx, event, recipient, attachments),
+#[instrument(skip(ctx, event, recipient, attachments, shutdown),
              fields(event_id = %event.event_id, email = %recipient.email))]
 pub async fn process_recipient(
     ctx: &ProcessorContext,
     event: &EmailEvent,
     recipient: &Recipient,
     attachments: &[ResolvedAttachment],
+    shutdown: &tokio_util::sync::CancellationToken,
 ) -> RecipientOutcome {
     // ── 0. Recipient email validation (before DB write) ─────────────────────
     if !is_valid_email(&recipient.email) {
@@ -61,18 +69,9 @@ pub async fn process_recipient(
     }
 
     // ── 1. Template lookup (before DB write) ────────────────────────────────
-    let prefetched_template = if let Some(ov) = event.body_override.as_ref() {
-        if ov.subject.is_empty() || ov.body_html.is_empty() || ov.body_text.is_empty() {
-            return RecipientOutcome::Failed(AppError::Mailer(
-                "permanent: body_override fields (subject, body_html, body_text) must all be non-empty".into(),
-            ));
-        }
-        None
-    } else {
-        match ctx.template_store.resolve(&event.event_type).await {
-            Ok(t) => Some(t),
-            Err(e) => return RecipientOutcome::Failed(e),
-        }
+    let prefetched_template = match ctx.template_store.resolve(&event.event_type).await {
+        Ok(t) => t,
+        Err(e) => return RecipientOutcome::Failed(e),
     };
 
     // ── 2. from_override validation (before DB write) ───────────────────────
@@ -86,6 +85,19 @@ pub async fn process_recipient(
     }
 
     // ── 3. Idempotency ───────────────────────────────────────────────────────
+    //
+    // Two cases:
+    //   A. First attempt — insert_pending returns Inserted; proceed.
+    //   B. Re-entry after restart / backoff — returns Duplicate { retry_count }.
+    //      The row may be PENDING (left by a previous mark_failed) or FAILED.
+    //      Either way we should proceed to send, not skip, because the runner
+    //      has already decided this recipient needs another attempt.
+    //      We only return Skipped when the row is already SENT or BLOCKED —
+    //      those are terminal states that must not be replayed.
+    //
+    // The returned retry_count lets process_recipient surface the current DB
+    // count back to the caller (runner) so it can seed its in-memory attempt
+    // counter without a second round-trip.
     let from_override_json = event
         .from_override
         .as_ref()
@@ -110,10 +122,20 @@ pub async fn process_recipient(
         )
         .await
     {
-        Ok(_) => {}
-        Err(AppError::Duplicate(_)) => {
-            info!("Skipping duplicate recipient");
-            return RecipientOutcome::Skipped;
+        Ok(InsertResult::Inserted) => {} // fresh row — proceed normally
+        Ok(InsertResult::Duplicate { retry_count }) => {
+            // Row already exists. Check whether it is in a terminal state.
+            match ctx.store.get_status(event.event_id, &recipient.email).await {
+                Ok(common::EmailStatus::Sent) | Ok(common::EmailStatus::Blocked) => {
+                    info!("Skipping already-terminal recipient");
+                    return RecipientOutcome::Skipped;
+                }
+                // PENDING or FAILED — surface the retry_count to the runner so
+                // it can seed its in-memory attempt counter without another query.
+                Ok(_) => return RecipientOutcome::Duplicate { retry_count },
+                // Can't read status — treat as transient and let runner decide.
+                Err(e) => return RecipientOutcome::Failed(e),
+            }
         }
         Err(e) => return RecipientOutcome::Failed(e),
     }
@@ -130,28 +152,18 @@ pub async fn process_recipient(
     }
 
     // ── 5. Template rendering ────────────────────────────────────────────────
-    let (subject, body_html, body_text) = if let Some(ov) = &event.body_override {
-        (
-            ov.subject.clone(),
-            ov.body_html.clone(),
-            ov.body_text.clone(),
-        )
-    } else {
-        let template = prefetched_template
-            .expect("template must have been pre-fetched when body_override is absent");
-        match (
-            render_template(&template.subject, &event.payload),
-            render_html_template(&template.body_html, &event.payload),
-            render_template(&template.body_text, &event.payload),
-        ) {
-            (Ok(s), Ok(h), Ok(t)) => (s, h, t),
-            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
-                let _ = ctx
-                    .store
-                    .mark_failed(event.event_id, &recipient.email, &e.to_string(), true)
-                    .await;
-                return RecipientOutcome::Failed(e);
-            }
+    let (subject, body_html, body_text) = match (
+        render_template(&prefetched_template.subject, &event.payload),
+        render_html_template(&prefetched_template.body_html, &event.payload),
+        render_template(&prefetched_template.body_text, &event.payload),
+    ) {
+        (Ok(s), Ok(h), Ok(t)) => (s, h, t),
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+            // Do NOT call mark_failed here — the runner calls it for every
+            // Failed outcome (permanent or transient).  Calling it here too
+            // would double-increment retry_count and total_attempts for
+            // template errors.
+            return RecipientOutcome::Failed(e);
         }
     };
 
@@ -168,7 +180,13 @@ pub async fn process_recipient(
     };
 
     // ── 6. Rate-limit token ──────────────────────────────────────────────────
-    ctx.rate_limiter.wait_for_token().await;
+    if !ctx.rate_limiter.wait_for_token(shutdown).await {
+        // Shutdown fired while waiting — propagate as a transient error so
+        // the runner's shutdown branch marks the row FAILED for manual retry.
+        return RecipientOutcome::Failed(AppError::Queue(
+            "service shutdown during rate-limit wait".into(),
+        ));
+    }
 
     // ── 7. Send ───────────────────────────────────────────────────────────────
     // Resolve the sender: named account from the registry takes priority;

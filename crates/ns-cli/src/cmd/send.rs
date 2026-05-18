@@ -1,11 +1,6 @@
-//! `ns send` — publish a new email event directly to RabbitMQ.
-//!
-//! Bypasses the outbox table; useful for one-off sends, testing templates,
-//! or re-triggering a delivery from the command line.
-
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
-use common::{AttachmentRef, BodyOverride, EmailEvent, FromOverride, Recipient};
+use common::{AttachmentRef, EmailEvent, FromOverride, Recipient};
 use dialoguer::Confirm;
 use lapin::{
     options::{BasicPublishOptions, ExchangeDeclareOptions},
@@ -80,22 +75,27 @@ pub async fn run(args: SendArgs, cfg: CliConfig) -> Result<()> {
 
     // ── 6. Build event ────────────────────────────────────────────────────────
 
-    // Construct body_override when all three direct-body flags are present.
-    // clap's `requires` constraints ensure either all three are Some or all None.
-    let body_override = match (&args.subject, &args.body_html, &args.body_text) {
-        (Some(subject), Some(body_html), Some(body_text)) => Some(BodyOverride {
-            subject: subject.clone(),
-            body_html: body_html.clone(),
-            body_text: body_text.clone(),
-        }),
-        _ => None,
+    // When --subject/--body-html/--body-text are all supplied, route through the
+    // built-in GENERIC_HTML template by injecting the values into the payload.
+    // This replaces the old body_override bypass — everything goes through the
+    // template engine, keeping the code path uniform.
+    let (event_type, payload) = match (&args.subject, &args.body_html, &args.body_text) {
+        (Some(subject), Some(body_html), Some(body_text)) => (
+            "GENERIC_HTML".to_string(),
+            serde_json::json!({
+                "subject":   subject,
+                "body_html": body_html,
+                "body_text": body_text,
+            }),
+        ),
+        _ => (args.event_type.clone(), payload),
     };
 
     let event_id = args.event_id.unwrap_or_else(Uuid::new_v4);
     let event = EmailEvent {
         event_id,
         timestamp: Utc::now(),
-        event_type: args.event_type.clone(),
+        event_type: event_type.clone(),
         recipients: recipients.clone(),
         payload,
         from_override,
@@ -103,7 +103,6 @@ pub async fn run(args: SendArgs, cfg: CliConfig) -> Result<()> {
             source: Some(args.source.clone()),
         },
         attachments,
-        body_override,
         sender_account: None,
     };
 
@@ -111,15 +110,15 @@ pub async fn run(args: SendArgs, cfg: CliConfig) -> Result<()> {
     if !args.yes {
         let to_str: Vec<&str> = recipients.iter().map(|r| r.email.as_str()).collect();
         println!("About to publish:");
-        println!("  Event type   : {}", args.event_type);
+        println!("  Event type   : {event_type}");
         println!("  Event ID     : {event_id}");
         println!("  Recipients   : {}", to_str.join(", "));
         println!("  Attachments  : {}", event.attachments.len());
-        if event.body_override.is_some() {
-            println!("  Body mode    : direct (body_override — template bypassed)");
+        if args.subject.is_some() {
+            println!("  Body mode    : generic HTML (GENERIC_HTML template)");
             println!("  Subject      : {}", args.subject.as_deref().unwrap_or(""));
         } else {
-            println!("  Body mode    : template");
+            println!("  Body mode    : template ({event_type})");
         }
 
         let ok = Confirm::new()

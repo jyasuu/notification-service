@@ -16,14 +16,14 @@ pub enum OutputFormat {
 #[derive(Debug, Parser)]
 #[command(
     name = "ns",
-    about = "notification-service operations CLI",
+    about = "anvil-notify operations CLI",
     version,
     propagate_version = true
 )]
 pub struct Cli {
     /// Path to a config file (TOML).
     /// Defaults to config/default.toml then config/local.toml, same as the service.
-    #[arg(long, short, global = true, env = "NS_CLI_CONFIG")]
+    #[arg(long, short, global = true, env = "AN_CLI_CONFIG")]
     pub config: Option<String>,
 
     /// Output format (`table` or `json`).
@@ -64,10 +64,9 @@ pub enum Command {
 pub struct SendArgs {
     /// Event type, e.g. ORDER_CONFIRMATION.
     ///
-    /// When --subject / --body-html / --body-text are supplied, the event
-    /// type does NOT need to correspond to a registered template — it is
-    /// used only for logging and metrics.
-    /// When those flags are absent, a matching template must exist.
+    /// When --subject / --body-html / --body-text are supplied, the CLI
+    /// automatically uses the GENERIC_HTML template regardless of this value.
+    /// When those flags are absent, a matching template must exist in the DB.
     #[arg(long, short = 't')]
     pub event_type: String,
 
@@ -114,14 +113,14 @@ pub struct SendArgs {
     #[arg(long, short = 'y')]
     pub yes: bool,
 
-    // ── Direct body override (optional) ─────────────────────────────────────
-    // When all three of --subject, --body-html, --body-text are given,
-    // the event is sent with a body_override and the registered template for
-    // --event-type is never consulted.
+    // ── Generic HTML shorthand (optional) ───────────────────────────────────
+    // When all three of --subject, --body-html, --body-text are given, the CLI
+    // sets event_type to GENERIC_HTML and populates the payload accordingly.
+    // A --payload value is ignored when these flags are present.
     /// Email subject line (plain text).
     ///
     /// Must be provided together with --body-html and --body-text.
-    /// When all three are present, bypasses template lookup entirely.
+    /// When all three are present, sends via the built-in GENERIC_HTML template.
     #[arg(long, requires = "body_html", requires = "body_text")]
     pub subject: Option<String>,
 
@@ -238,7 +237,7 @@ pub enum TemplateAction {
 
 #[derive(Debug, Args)]
 pub struct HealthArgs {
-    /// URL of the running notification-service HTTP API.
+    /// URL of the running anvil-notify HTTP API.
     /// Falls back to http://localhost:<http.port> from config.
     #[arg(long)]
     pub api_url: Option<String>,

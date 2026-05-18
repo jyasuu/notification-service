@@ -3,18 +3,18 @@
 # Mount this file read-only into the container (see docker-compose.yml).
 #
 # Secrets that differ between deployments (DB password, SMTP password, API key)
-# can still be supplied via NS__* env vars — they layer on top of this file.
+# can still be supplied via AN__* env vars — they layer on top of this file.
 # Everything that has a type the env-var source struggles with (u16 ports,
 # Vec<String> arrays) lives here as proper TOML so the config crate never
 # has to coerce a string.
 
 [database]
-url = "postgres://postgres:postgres@postgres:5432/notifications"
+url = "postgres://postgres:postgres@postgres:5432/anvil_notify"
 
 [amqp]
 url             = "amqp://guest:guest@rabbitmq:5672"
 queue           = "email.requested"
-exchange        = "notifications"
+exchange        = "anvil-notify"
 routing_key     = "email.requested"
 max_retries     = 3
 retry_base_ms   = 1000
@@ -43,7 +43,7 @@ blocked_domains = []
 # ── Mailer ────────────────────────────────────────────────────────────────────
 # Dev default: points at the Mailpit catch-all (start with --profile dev).
 # For production, change host/port/username/password/from_email/from_name,
-# or supply NS__MAILER__PASSWORD via an env var / Docker secret.
+# or supply AN__MAILER__PASSWORD via an env var / Docker secret.
 [mailer]
 backend    = "smtp"
 host       = "mailpit"
@@ -51,4 +51,4 @@ port       = 1025
 username   = ""
 password   = ""
 from_email = "no-reply@example.com"
-from_name  = "Notification Service"
+from_name  = "AnvilNotify"

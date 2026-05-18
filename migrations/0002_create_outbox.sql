@@ -1,6 +1,6 @@
 -- migrations/0002_create_outbox.sql
 -- Run this migration in the BUSINESS SERVICE database, not the
--- notification-service database.
+-- anvil-notify database.
 --
 -- The outbox worker polls this table and forwards PENDING rows to RabbitMQ.
 

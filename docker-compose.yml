@@ -19,14 +19,14 @@ volumes:
 
 # ── Services ──────────────────────────────────────────────────────────────────
 services:
-  # ── PostgreSQL (notification-service own DB) ──────────────────────────────
+  # ── PostgreSQL (anvil-notify own DB) ──────────────────────────────
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-notifications}
+      POSTGRES_DB: ${POSTGRES_DB:-anvil_notify}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
@@ -37,7 +37,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-notifications}",
+          "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-anvil_notify}",
         ]
       interval: 10s
       timeout: 5s
@@ -71,7 +71,7 @@ services:
 
   # ── Migration runner ──────────────────────────────────────────────────────
   # Runs once, applies all pending migrations to both DBs, then exits (code 0).
-  # notification-service and outbox-worker both wait for this to complete
+  # anvil-notify and outbox-worker both wait for this to complete
   # before starting, so the schema is always ready before any app code runs.
   #
   # Re-running `docker compose up` is safe — sqlx skips already-applied migrations.
@@ -87,8 +87,8 @@ services:
       business-postgres:
         condition: service_healthy
     environment:
-      NOTIFICATION_DATABASE_URL: >-
-        postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-notifications}
+      ANVIL_DATABASE_URL: >-
+        postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-anvil_notify}
       BUSINESS_DATABASE_URL: >-
         postgres://${BUSINESS_POSTGRES_USER:-postgres}:${BUSINESS_POSTGRES_PASSWORD:-postgres}@business-postgres:5432/${BUSINESS_POSTGRES_DB:-business}
     networks:
@@ -132,11 +132,11 @@ services:
   # ── Notification service ──────────────────────────────────────────────────
   # Waits for migrate to finish — schema is guaranteed ready on first query.
   # No longer calls sqlx::migrate!() itself; that's the runner's job.
-  notification-service:
+  anvil-notify:
     build:
       context: .
       dockerfile: Dockerfile
-    image: notification-service:latest
+    image: anvil-notify:latest
     restart: unless-stopped
     stop_grace_period: 35s
     depends_on:
@@ -147,10 +147,10 @@ services:
     volumes:
       - ./config/local.toml:/app/config/local.toml:ro
     environment:
-      NS__DATABASE__URL: >-
-        postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-notifications}
-      NS__AMQP__URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672
-      NS__MAILER__PASSWORD: ${SMTP_PASS:-}
+      AN__DATABASE__URL: >-
+        postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-anvil_notify}
+      AN__AMQP__URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672
+      AN__MAILER__PASSWORD: ${SMTP_PASS:-}
       RUST_LOG: ${RUST_LOG:-info}
       LOG_FORMAT: pretty
     ports:
@@ -181,13 +181,13 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-      NS_OUTBOX__DATABASE_URL: >-
+      AN__OUTBOX__DATABASE_URL: >-
         postgres://${BUSINESS_POSTGRES_USER:-postgres}:${BUSINESS_POSTGRES_PASSWORD:-postgres}@business-postgres:5432/${BUSINESS_POSTGRES_DB:-business}
-      NS_OUTBOX__AMQP_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672
-      NS_OUTBOX__EXCHANGE: ${AMQP_EXCHANGE:-notifications}
-      NS_OUTBOX__ROUTING_KEY: ${AMQP_ROUTING_KEY:-email.requested}
-      NS_OUTBOX__POLL_INTERVAL_MS: ${OUTBOX_POLL_INTERVAL_MS:-1000}
-      NS_OUTBOX__BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-50}
+      AN__OUTBOX__AMQP_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672
+      AN__OUTBOX__EXCHANGE: ${AMQP_EXCHANGE:-anvil-notify}
+      AN__OUTBOX__ROUTING_KEY: ${AMQP_ROUTING_KEY:-email.requested}
+      AN__OUTBOX__POLL_INTERVAL_MS: ${OUTBOX_POLL_INTERVAL_MS:-1000}
+      AN__OUTBOX__BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-50}
       RUST_LOG: ${RUST_LOG:-info}
       LOG_FORMAT: pretty
     networks:

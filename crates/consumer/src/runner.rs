@@ -56,6 +56,7 @@ pub async fn run_consumer(
         }
 
         info!(url = %cfg.amqp_url, "Connecting to RabbitMQ");
+        let connected_at = std::time::Instant::now();
 
         match connect_and_consume(
             &cfg,
@@ -75,6 +76,13 @@ pub async fn run_consumer(
                 return Ok(());
             }
             Err(e) => {
+                // If the connection stayed alive for a meaningful period before
+                // failing, treat this as a fresh start and reset the backoff.
+                // This prevents a long-lived connection that eventually drops
+                // from carrying a near-maximum delay into the very next reconnect.
+                if connected_at.elapsed() > Duration::from_secs(30) {
+                    reconnect_delay = Duration::from_secs(2);
+                }
                 error!(error = %e, delay_secs = reconnect_delay.as_secs(), "Consumer error — reconnecting");
                 tokio::select! {
                     _ = sleep(reconnect_delay) => {}
@@ -102,7 +110,7 @@ async fn connect_and_consume(
     let mut consumer = channel
         .basic_consume(
             &cfg.queue,
-            "notification-service",
+            "anvil-notify",
             BasicConsumeOptions::default(),
             FieldTable::default(),
         )
@@ -177,7 +185,32 @@ async fn handle_delivery(
         return;
     }
 
+    // Guard against pathologically large recipient lists that would monopolise
+    // the semaphore permit for an unbounded duration and exhaust DB connections.
+    // Events exceeding the limit are sent to the DLQ for operator inspection.
+    if event.recipients.len() > cfg.max_recipients_per_event {
+        error!(
+            event_id        = %event.event_id,
+            recipient_count = event.recipients.len(),
+            limit           = cfg.max_recipients_per_event,
+            "Event exceeds max_recipients_per_event — sending to DLQ"
+        );
+        let _ = delivery
+            .nack(BasicNackOptions {
+                requeue: false,
+                ..Default::default()
+            })
+            .await;
+        return;
+    }
+
     // ── Fetch attachments once for the whole event ───────────────────────────
+    // Attachment bytes are held in memory for the lifetime of this handler
+    // (until all recipients are processed). Peak memory per event is therefore:
+    //   num_attachments × max_attachment_bytes (default: 10 MiB each).
+    // With max_concurrency concurrent handlers this becomes:
+    //   max_concurrency × num_attachments × max_attachment_bytes.
+    // Size-cap `max_attachment_bytes` in config if memory pressure is a concern.
     let resolved_attachments: Vec<ResolvedAttachment> = if event.attachments.is_empty() {
         vec![]
     } else {
@@ -234,20 +267,23 @@ async fn process_one_recipient(
     cfg: &ConsumerConfig,
     shutdown: &CancellationToken,
 ) {
-    // Seed attempt counter from DB so restarts don't reset the count.
-    let initial = ctx
-        .store
-        .get_retry_count(event.event_id, &recipient.email)
-        .await
-        .unwrap_or(0) as u32;
-
-    let mut attempt = initial;
+    // attempt is seeded from 0 on the first call; if the row already exists
+    // (restart / re-delivery), process_recipient returns Duplicate { retry_count }
+    // on the first iteration and we update attempt here — no separate DB query.
+    let mut attempt: u32 = 0;
     let mut rl_count: u32 = 0;
 
     loop {
-        match process_recipient(ctx, event, recipient, attachments).await {
+        match process_recipient(ctx, event, recipient, attachments, shutdown).await {
             RecipientOutcome::Sent | RecipientOutcome::Blocked(_) | RecipientOutcome::Skipped => {
                 return;
+            }
+
+            // Row existed and is non-terminal — seed attempt counter from DB
+            // value and immediately retry without consuming a retry slot.
+            RecipientOutcome::Duplicate { retry_count } => {
+                attempt = retry_count as u32;
+                continue;
             }
 
             RecipientOutcome::Failed(ref e) if !is_retryable(e) => {
@@ -335,6 +371,11 @@ async fn process_one_recipient(
             RecipientOutcome::Failed(ref e) => {
                 attempt += 1;
                 rl_count = 0;
+                // The `.min(10)` caps the *shift* (not `attempt` itself) to prevent
+                // overflow: 1 << 10 = 1024, so with the default retry_base_ms=1000
+                // the maximum single delay is ~17 min.  `attempt` may legitimately
+                // exceed 10 when seeded from a high DB retry_count after a restart,
+                // but the delay stays capped at this ceiling regardless.
                 let delay = Duration::from_millis(cfg.retry_base_ms * (1 << attempt.min(10)));
                 warn!(
                     event_id = %event.event_id,

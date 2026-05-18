@@ -5,7 +5,8 @@ use axum::{
     Json,
 };
 use chrono::Utc;
-use common::{is_valid_email, AppError, EmailStatus};
+use common::{is_valid_email, AppError, AttachmentRef, EmailEvent, EmailStatus, FromOverride, Recipient};
+use common::event::Metadata;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -18,12 +19,21 @@ use crate::{errors::ApiError, state::ApiState};
 /// faithfully replayed — not a stripped-down envelope that loses the From
 /// address override or file attachments.
 ///
+/// `only_emails` — when `Some`, only those email addresses are included in the
+/// published recipients list. Used by single-recipient retry to avoid
+/// re-enqueuing already-terminal (SENT/BLOCKED) recipients alongside the one
+/// being retried, which would cause unnecessary AMQP round-trips and log noise.
+/// The consumer's idempotency guard still protects against double-sends, but
+/// not publishing them in the first place is cleaner.
+/// Pass `None` for bulk retry (all reset recipients are wanted).
+///
 /// Pre-0009 rows that have `from_override = NULL` or `attachments = NULL`
 /// fall back to omitting those fields (same behaviour as before).
-///
-/// The consumer's idempotency guard (`ON CONFLICT DO NOTHING`) ensures rows
-/// that are already PENDING are not double-inserted; they simply stay PENDING.
-async fn republish_event(state: &ApiState, event_id: Uuid) -> Result<(), ApiError> {
+async fn republish_event(
+    state: &ApiState,
+    event_id: Uuid,
+    only_emails: Option<&[String]>,
+) -> Result<(), ApiError> {
     let logs = state.store.get_by_event_id(event_id).await?;
     if logs.is_empty() {
         return Err(ApiError(AppError::NotFound(event_id.to_string())));
@@ -107,16 +117,24 @@ async fn republish_event(state: &ApiState, event_id: Uuid) -> Result<(), ApiErro
         }
     }
 
-    let recipients: Vec<serde_json::Value> = logs
+    // Only include the recipients that were actually reset. For single-recipient
+    // retry this is just the one email; for bulk retry it is all reset addresses.
+    // This avoids publishing already-terminal (SENT/BLOCKED) recipients into the
+    // queue, which would cause unnecessary AMQP round-trips and consumer log noise
+    // (even though the idempotency guard would skip them on re-delivery).
+    let recipients: Vec<Recipient> = logs
         .iter()
-        .map(|l| {
+        .filter(|l| {
+            only_emails
+                .map(|set| set.iter().any(|e| e == &l.recipient_email))
+                .unwrap_or(true)
+        })
+        .map(|l| Recipient {
+            email: l.recipient_email.clone(),
             // Preserve the original display name so templates that use {{name}}
             // render correctly on retried deliveries (pre-0011 rows have NULL
             // which is omitted, matching the original behaviour).
-            match &l.recipient_name {
-                Some(name) => json!({ "email": l.recipient_email, "name": name }),
-                None => json!({ "email": l.recipient_email }),
-            }
+            name: l.recipient_name.clone(),
         })
         .collect();
 
@@ -126,18 +144,31 @@ async fn republish_event(state: &ApiState, event_id: Uuid) -> Result<(), ApiErro
     // [mailer] default — acceptable for legacy rows).
     let sender_account = logs.iter().find_map(|l| l.sender_account.clone());
 
-    let envelope = json!({
-        "event_id":       event_id,
-        "timestamp":      original_timestamp.to_rfc3339(),
-        "type":           event_type,
-        "recipients":     recipients,
-        "payload":        template_payload,
-        "from_override":  from_override,   // null when not stored (pre-0009 rows)
-        "attachments":    attachments,
-        "sender_account": sender_account,  // null when not stored (pre-0014 rows)
-    });
+    // Deserialize the stored from_override JSON back into the typed struct so
+    // the retry envelope is always built through EmailEvent — guaranteeing the
+    // serialized field names match what the consumer deserializes.
+    let from_override: Option<FromOverride> = from_override
+        .as_ref()
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+    // Deserialize stored attachment refs back to typed structs for the same
+    // reason — field names are guaranteed consistent with EmailEvent.
+    let attachments: Vec<AttachmentRef> = serde_json::from_value(attachments)
+        .unwrap_or_default();
+
+    let event = EmailEvent {
+        event_id,
+        timestamp: original_timestamp,
+        event_type,
+        recipients,
+        payload: template_payload,
+        from_override,
+        metadata: Metadata { source: None },
+        attachments,
+        sender_account,
+    };
     let body =
-        serde_json::to_vec(&envelope).map_err(|e| ApiError(AppError::Queue(e.to_string())))?;
+        serde_json::to_vec(&event).map_err(|e| ApiError(AppError::Queue(e.to_string())))?;
     state.publisher.publish(body).await.map_err(ApiError)?;
     Ok(())
 }
@@ -299,7 +330,9 @@ pub async fn retry_recipient(
     // Atomic UPDATE: only succeeds when status = 'FAILED'.
     // Replaces the old fetch-then-update pattern that had a TOCTOU race.
     state.store.reset_for_retry(event_id, &email).await?;
-    republish_event(&state, event_id).await?;
+    // Only re-enqueue the one recipient that was reset — not the whole event.
+    // SENT/BLOCKED recipients in the same event must not be re-published.
+    republish_event(&state, event_id, Some(&[email.clone()])).await?;
 
     Ok((
         StatusCode::ACCEPTED,
@@ -328,7 +361,7 @@ pub async fn retry_event(
         ))));
     }
 
-    republish_event(&state, event_id).await?;
+    republish_event(&state, event_id, Some(&reset)).await?;
 
     Ok((
         StatusCode::ACCEPTED,

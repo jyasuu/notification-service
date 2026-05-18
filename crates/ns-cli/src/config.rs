@@ -1,6 +1,6 @@
 //! Config loader for the CLI.
 //!
-//! Reads the same config/default.toml + config/local.toml + NS__ env vars
+//! Reads the same config/default.toml + config/local.toml + AN__ env vars
 //! as the service so the CLI works without extra setup.
 
 use anyhow::{Context, Result};
@@ -13,9 +13,9 @@ pub struct CliConfig {
     pub http: HttpConfig,
     /// Outbox DB URL — only needed for `ns outbox`.
     pub outbox_database_url: Option<String>,
-    /// Base URL of the running notification-service HTTP API.
+    /// Base URL of the running anvil-notify HTTP API.
     /// Defaults to `http://localhost:<http.port>`.
-    /// Override with `NS__API_URL` or `api_url` in config/local.toml when
+    /// Override with `AN__API_URL` or `api_url` in config/local.toml when
     /// the service is not on the same host as the CLI (e.g. staging, k8s).
     pub api_url: Option<String>,
 }
@@ -39,7 +39,7 @@ pub struct HttpConfig {
 }
 
 impl CliConfig {
-    /// Base URL for the notification-service HTTP API.
+    /// Base URL for the anvil-notify HTTP API.
     ///
     /// Returns `api_url` from config when set, otherwise falls back to
     /// `http://localhost:<http.port>`.  All HTTP-calling commands (`retry`,
@@ -58,7 +58,7 @@ impl CliConfig {
 pub fn load(path: Option<&str>) -> Result<CliConfig> {
     let mut builder = config::Config::builder()
         .set_default("http.port", 8080)?
-        .set_default("amqp.exchange", "notifications")?
+        .set_default("amqp.exchange", "anvil-notify")?
         .set_default("amqp.routing_key", "email.requested")?;
 
     if let Some(p) = path {

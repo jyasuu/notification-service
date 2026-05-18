@@ -38,7 +38,7 @@ pub async fn run(args: OutboxArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<
         Some(u) => u,
         None => bail!(
             "outbox_database_url is not configured.\n\
-             Set NS__OUTBOX_DATABASE_URL or add outbox_database_url to config/local.toml."
+             Set AN__OUTBOX_DATABASE_URL or add outbox_database_url to config/local.toml."
         ),
     };
 

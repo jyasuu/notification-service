@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE outbox\n        SET    status = 'PUBLISHED', published_at = now(), locked_at = NULL\n        WHERE  id = $1 AND status = 'IN_PROGRESS'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9c2571e931e0b95f712e66d68ab553609650e10563a05249273d7bdaeeadb101"
+}

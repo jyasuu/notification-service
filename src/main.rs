@@ -162,6 +162,14 @@ async fn main() -> anyhow::Result<()> {
     info!("API publisher connected to RabbitMQ");
 
     // ── HTTP API ──────────────────────────────────────────────────────────────
+    if cfg.http.api_key.is_none() {
+        tracing::warn!(
+            "HTTP API authentication is DISABLED — all /emails/* and /templates/* endpoints \
+             are publicly accessible. Set AN__HTTP__API_KEY (or http.api_key in config) \
+             unless this service is isolated behind a private network."
+        );
+    }
+
     let api_state = ApiState {
         store: store.clone(),
         template_store: template_store.clone(),
@@ -200,6 +208,7 @@ async fn main() -> anyhow::Result<()> {
         max_concurrency: cfg.amqp.max_concurrency,
         max_attachment_bytes: cfg.max_attachment_bytes,
         max_rl_waits: cfg.amqp.max_rl_waits,
+        max_recipients_per_event: cfg.amqp.max_recipients_per_event,
     };
 
     let consumer_shutdown = shutdown.clone();
@@ -220,7 +229,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    info!("Notification service running");
+    info!("AnvilNotify running");
 
     // ── Graceful shutdown ─────────────────────────────────────────────────────
     // Listen for SIGINT (Ctrl-C) and SIGTERM (Kubernetes / container runtimes).

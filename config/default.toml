@@ -1,19 +1,19 @@
 # config/default.toml
-# Override any field with environment variables prefixed NS__
-# e.g. NS_DATABASE__URL="postgres://..." NS_MAILER__BACKEND="smtp"
+# Override any field with environment variables prefixed AN__
+# e.g. AN__DATABASE__URL="postgres://..." AN__MAILER__BACKEND="smtp"
 
 [database]
-url = "postgres://postgres:postgres@localhost:5432/notifications"
-# pool_size = 10   # Max DB connections. Override via NS__DATABASE__POOL_SIZE.
+url = "postgres://postgres:postgres@localhost:5432/anvil_notify"
+# pool_size = 10   # Max DB connections. Override via AN__DATABASE__POOL_SIZE.
 
-# Optional: set NS_OUTBOX_DATABASE_URL to enable the built-in outbox worker.
+# Optional: set AN__OUTBOX_DATABASE_URL to enable the built-in outbox worker.
 # Leave unset if your business service publishes to RabbitMQ directly.
 # outbox_database_url = "postgres://postgres:postgres@localhost:5432/business"
 
 [amqp]
 url                   = "amqp://guest:guest@localhost:5672"
 queue                 = "email.requested"
-exchange              = "notifications"
+exchange              = "anvil-notify"
 routing_key           = "email.requested"
 max_retries           = 3
 retry_base_ms         = 1000
@@ -23,14 +23,19 @@ max_concurrency       = 10      # max parallel message handlers
 # Increase for providers with long rate-limit cooldown windows (e.g. free-tier
 # SendGrid); decrease to fail faster during sustained outages.
 max_rl_waits          = 5
-outbox_poll_interval_ms = 1000  # ms between outbox scans (when worker enabled)
-outbox_batch_size     = 50      # rows per scan
+# Hard cap on recipients per AMQP message. Events exceeding this are sent to
+# the DLQ for operator inspection. Raise for bulk-mailing; default: 500.
+max_recipients_per_event = 500
+outbox_poll_interval_ms      = 1000  # base ms between outbox polls; backs off up to 8× when idle
+outbox_batch_size            = 10    # rows per poll cycle (smaller = shorter IN_PROGRESS lock window)
+# outbox_pool_size           = 2    # DB connections for the outbox worker (rarely needs > 2)
+# outbox_stale_lock_timeout_secs = 300  # seconds before a stuck IN_PROGRESS row is reset to PENDING
 
 [http]
 port = 8080
 
 # Optional: bearer token required on all /emails/* endpoints.
-# Set NS__HTTP__API_KEY=<token> in production. Leave unset only when the
+# Set AN__HTTP__API_KEY=<token> in production. Leave unset only when the
 # API is isolated behind a private network (e.g. Kubernetes ClusterIP).
 # api_key = "change-me-in-production"
 
@@ -65,7 +70,7 @@ template_cache_ttl_secs = 300  # 5 minutes
 
 # Maximum size of a single fetched email attachment in bytes.
 # Attachments larger than this are permanently rejected (no retry).
-# Default: 10 MiB. Override with NS__MAX_ATTACHMENT_BYTES.
+# Default: 10 MiB. Override with AN__MAX_ATTACHMENT_BYTES.
 max_attachment_bytes = 10485760  # 10 * 1024 * 1024
 
 # ── Choose one backend ────────────────────────────────────────────────────────

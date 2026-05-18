@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE outbox\n        SET    status    = 'PENDING',\n               locked_at = NULL\n        WHERE  status    = 'IN_PROGRESS'\n          AND  locked_at < now() - make_interval(secs => $1)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e9cbf6deab988e6aa16b375eb7a7e20f71dfd223f0cf5d495a55f3d8a055c364"
+}

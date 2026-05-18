@@ -42,7 +42,7 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/notification-service ./notification-service
+COPY --from=builder /app/target/release/anvil-notify ./anvil-notify
 COPY --from=builder /app/migrations  ./migrations
 COPY --from=builder /app/config      ./config
 
@@ -52,4 +52,4 @@ USER appuser
 
 EXPOSE 8080
 
-ENTRYPOINT ["./notification-service"]
+ENTRYPOINT ["./anvil-notify"]

@@ -5,5 +5,5 @@ pub mod log;
 
 pub use email_validation::is_valid_email;
 pub use error::AppError;
-pub use event::{AttachmentRef, BodyOverride, EmailEvent, FromOverride, Recipient};
+pub use event::{AttachmentRef, EmailEvent, FromOverride, Recipient};
 pub use log::{EmailLog, EmailStatus};

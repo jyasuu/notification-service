@@ -87,17 +87,27 @@ impl MailRateLimiter {
         }
     }
 
-    /// Wait asynchronously until a send token is available.
+    /// Wait asynchronously until a send token is available, or until `shutdown`
+    /// is cancelled.
     ///
-    /// Uses `governor::RateLimiter::until_ready()` which suspends the task
-    /// without spinning — the executor is not woken until the bucket actually
-    /// has capacity.
+    /// Returns `true` if a token was acquired, `false` if shutdown fired first.
+    /// When `false`, the caller should propagate the shutdown signal instead of
+    /// proceeding with the send — the semaphore permit is released promptly.
     ///
-    /// Returns immediately when rate limiting is disabled.
-    pub async fn wait_for_token(&self) {
-        if let Some(limiter) = &self.inner {
-            limiter.until_ready().await;
-            debug!("Rate limit token acquired");
+    /// Returns `true` immediately when rate limiting is disabled.
+    pub async fn wait_for_token(&self, shutdown: &tokio_util::sync::CancellationToken) -> bool {
+        let Some(limiter) = &self.inner else {
+            return true;
+        };
+        tokio::select! {
+            _ = limiter.until_ready() => {
+                debug!("Rate limit token acquired");
+                true
+            }
+            _ = shutdown.cancelled() => {
+                debug!("Rate limit wait interrupted by shutdown");
+                false
+            }
         }
     }
 
@@ -120,7 +130,8 @@ mod tests {
         });
         assert!(rl.is_disabled());
         let t = Instant::now();
-        rl.wait_for_token().await;
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        assert!(rl.wait_for_token(&shutdown).await);
         assert!(t.elapsed().as_millis() < 50);
     }
 
@@ -130,10 +141,30 @@ mod tests {
             emails_per_second: 5,
             burst_size: 5,
         });
+        let shutdown = tokio_util::sync::CancellationToken::new();
         let t = Instant::now();
         for _ in 0..5 {
-            rl.wait_for_token().await;
+            assert!(rl.wait_for_token(&shutdown).await);
         }
         assert!(t.elapsed().as_millis() < 200, "burst took too long");
+    }
+
+    #[tokio::test]
+    async fn shutdown_interrupts_wait() {
+        let rl = MailRateLimiter::new(RateLimitConfig {
+            emails_per_second: 1,
+            burst_size: 1,
+        });
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        // Drain the one burst token
+        assert!(rl.wait_for_token(&shutdown).await);
+        // Cancel immediately — next wait should return false without blocking
+        shutdown.cancel();
+        let t = Instant::now();
+        assert!(!rl.wait_for_token(&shutdown).await);
+        assert!(
+            t.elapsed().as_millis() < 50,
+            "cancelled wait should be instant"
+        );
     }
 }

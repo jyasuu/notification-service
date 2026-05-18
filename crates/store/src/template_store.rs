@@ -114,6 +114,24 @@ impl TemplateStore {
             return Ok(tpl);
         }
 
+        // No active DB row found.  Check whether a stale cache entry is still
+        // present (i.e. the template was deleted or deactivated while it was
+        // cached).  Warn loudly so operators know the cache is masking the
+        // deletion; the stale entry will expire naturally after `cache_ttl`.
+        // Use DELETE /templates/<event_type>/cache to evict it immediately.
+        {
+            let cache = self.cache.read().await;
+            if cache.contains_key(event_type) {
+                tracing::warn!(
+                    event_type,
+                    cache_ttl_secs = self.cache_ttl.as_secs(),
+                    "Template '{event_type}' not found in DB but a stale cache entry \
+                     is still active — it will continue to be served until the TTL \
+                     expires or DELETE /templates/{event_type}/cache is called"
+                );
+            }
+        }
+
         // No DB row and no fallback — the event type is unknown.
         // This is a permanent error: the consumer will mark the delivery FAILED
         // immediately (no retries) so the message does not burn retry slots

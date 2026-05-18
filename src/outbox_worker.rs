@@ -2,17 +2,17 @@
 //!
 //! Connects to the **business** database (read/write on the `outbox` table)
 //! and the shared RabbitMQ broker.  It has NO connection to the
-//! notification-service's own PostgreSQL database — that isolation is the
+//! anvil-notify's own PostgreSQL database — that isolation is the
 //! entire point of running this as a separate container.
 //!
-//! Configuration is via environment variables (NS_OUTBOX__ prefix):
+//! Configuration is via environment variables (AN__OUTBOX__ prefix):
 //!
-//!   NS_OUTBOX__DATABASE_URL   — business DB  (required)
-//!   NS_OUTBOX__AMQP_URL       — RabbitMQ URL (required)
-//!   NS_OUTBOX__EXCHANGE       — default: notifications
-//!   NS_OUTBOX__ROUTING_KEY    — default: email.requested
-//!   NS_OUTBOX__POLL_INTERVAL_MS — default: 1000
-//!   NS_OUTBOX__BATCH_SIZE     — default: 50
+//!   AN__OUTBOX__DATABASE_URL   — business DB  (required)
+//!   AN__OUTBOX__AMQP_URL       — RabbitMQ URL (required)
+//!   AN__OUTBOX__EXCHANGE       — default: anvil-notify
+//!   AN__OUTBOX__ROUTING_KEY    — default: email.requested
+//!   AN__OUTBOX__POLL_INTERVAL_MS — default: 1000
+//!   AN__OUTBOX__BATCH_SIZE     — default: 50
 
 use anyhow::Context;
 use outbox::{run_outbox_worker, OutboxConfig};
@@ -33,13 +33,18 @@ struct OutboxEnv {
     poll_interval_ms: u64,
     #[serde(default = "default_batch_size")]
     batch_size: i64,
-    /// Max connections in the outbox DB pool (NS_OUTBOX__POOL_SIZE, default: 5).
+    /// Max connections in the outbox DB pool (AN__OUTBOX__POOL_SIZE, default: 2).
     #[serde(default = "default_pool_size")]
     pool_size: u32,
+    /// Seconds before an IN_PROGRESS row is considered stuck and reset to
+    /// PENDING by the reaper (AN__OUTBOX__STALE_LOCK_TIMEOUT_SECS, default: 300).
+    /// Requires migration 0016_outbox_locked_at.sql to be applied first.
+    #[serde(default = "default_stale_lock_timeout_secs")]
+    stale_lock_timeout_secs: u64,
 }
 
 fn default_exchange() -> String {
-    "notifications".into()
+    "anvil-notify".into()
 }
 fn default_routing_key() -> String {
     "email.requested".into()
@@ -51,20 +56,23 @@ fn default_batch_size() -> i64 {
     50
 }
 fn default_pool_size() -> u32 {
-    5
+    2
+}
+fn default_stale_lock_timeout_secs() -> u64 {
+    300
 }
 
 impl OutboxEnv {
     fn load() -> anyhow::Result<Self> {
         let cfg = config::Config::builder()
-            .add_source(config::Environment::with_prefix("NS_OUTBOX").separator("__"))
+            .add_source(config::Environment::with_prefix("AN__OUTBOX").separator("__"))
             .build()?;
         let env: Self = cfg.try_deserialize()?;
         if env.database_url.is_empty() {
-            anyhow::bail!("NS_OUTBOX__DATABASE_URL must not be empty");
+            anyhow::bail!("AN__OUTBOX__DATABASE_URL must not be empty");
         }
         if env.amqp_url.is_empty() {
-            anyhow::bail!("NS_OUTBOX__AMQP_URL must not be empty");
+            anyhow::bail!("AN__OUTBOX__AMQP_URL must not be empty");
         }
         Ok(env)
     }
@@ -109,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
         poll_interval_ms: env.poll_interval_ms,
         batch_size: env.batch_size,
         pool_size: env.pool_size,
+        stale_lock_timeout_secs: env.stale_lock_timeout_secs,
     };
 
     // ── Graceful shutdown ─────────────────────────────────────────────────────

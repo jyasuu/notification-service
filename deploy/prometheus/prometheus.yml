@@ -3,9 +3,9 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: notification-service
+  - job_name: anvil-notify
     static_configs:
-      - targets: ["notification-service:9091"]
+      - targets: ["anvil-notify:9091"]
     metrics_path: /metrics
 
   - job_name: rabbitmq
