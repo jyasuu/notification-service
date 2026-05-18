@@ -67,9 +67,11 @@ impl TemplateStore {
 
     /// Resolve the template for `event_type`.
     ///
+    /// This is the **sole runtime path** for template resolution.  All email
+    /// deliveries go through this method; there is no in-process fallback.
+    ///
     /// Returns `AppError::Template` for unknown event types so the message is
-    /// immediately routed to DLQ without wasting retry slots (same semantics
-    /// as the old `templates_for()` function).
+    /// immediately routed to DLQ without wasting retry slots.
     #[instrument(skip(self), fields(event_type))]
     pub async fn resolve(&self, event_type: &str) -> Result<EmailTemplate, AppError> {
         // ── 1. Cache hit (only when TTL is non-zero and entry is fresh) ───────

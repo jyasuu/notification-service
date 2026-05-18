@@ -169,9 +169,32 @@ endpoint when `summary.failed > 0`, or set up an alert on the
 
 ## Adding a new template
 
-Edit `crates/mailer/src/template.rs` → `templates_for()` to add a new
-`event_type` branch. In a production system, replace this with a DB lookup
-against the `email_template` table.
+Templates are stored in the `email_template` database table. To add a new
+event type, insert a row — no code change or service restart required:
+
+```sql
+INSERT INTO email_template (type, subject, body_html, body_text)
+VALUES (
+    'INVOICE_READY',
+    'Your invoice #{{ invoiceId }} is ready',
+    '<h1>Hi {{ name }},</h1><p>Invoice <strong>#{{ invoiceId }}</strong> for ${{ amount }} is ready.</p>',
+    'Hi {{ name }}, invoice #{{ invoiceId }} for ${{ amount }} is ready.'
+);
+```
+
+Then flush the cache so the service picks it up immediately (otherwise it will
+be loaded automatically within `template_cache_ttl_secs`, default 5 minutes):
+
+```bash
+DELETE /templates/INVOICE_READY/cache
+# or via CLI:
+ns template flush --event-type INVOICE_READY
+```
+
+Templates use [Jinja2 (minijinja)](https://docs.rs/minijinja/latest/minijinja/)
+syntax. See the [syntax quick-reference](#syntax-quick-reference) above.
+The built-in templates (`ORDER_CONFIRMATION`, `PASSWORD_RESET`, `WELCOME`,
+`GENERIC_TEXT`, `GENERIC_HTML`) are seeded and kept up-to-date by migrations.
 
 ## Business service database migrations
 

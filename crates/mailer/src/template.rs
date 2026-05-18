@@ -146,71 +146,47 @@ fn template_err(phase: &str, err: minijinja::Error) -> AppError {
     AppError::Template(detail)
 }
 
-// ── Built-in fallback templates ───────────────────────────────────────────────
+// ── Built-in template strings (used in tests only) ────────────────────────────
 //
-// These exist so the CLI `ns send` command and unit tests can work without
-// a database.  The `TemplateStore` (backed by the `email_template` table) is
-// the authoritative source at runtime; these are only consulted when no DB
-// row is found.
+// The canonical, authoritative versions of these templates live in the
+// `email_template` database table, seeded and kept up-to-date by migrations
+// 0010, 0017, and 0018.  The constants below are used exclusively by unit
+// tests that exercise the rendering functions without a database.
 //
-// Migration 0010 / 0017 seeds these same strings into the DB.
-// Migration 0018 updates GENERIC_HTML to use `| safe` for body_html.
+// Do NOT use these constants at runtime.  All runtime template resolution goes
+// through `TemplateStore::resolve()` (crates/store/src/template_store.rs),
+// which queries the DB with a TTL cache and returns `AppError::Template` for
+// unknown event types so the consumer can immediately route to DLQ.
+//
+// To add a new event type: INSERT a row into `email_template`.  No code change
+// or redeploy is required; the cache picks it up within `template_cache_ttl_secs`.
 
-/// Resolve a `(subject_template, html_template, text_template)` triplet from
-/// the event type.
-///
-/// Returns [`AppError::Template`] for unknown event types so the consumer can
-/// immediately route to DLQ without burning retry slots.
-pub fn templates_for(
-    event_type: &str,
-) -> Result<(&'static str, &'static str, &'static str), AppError> {
-    match event_type {
-        "ORDER_CONFIRMATION" => Ok((
-            "Order {{ orderId }} confirmed",
-            r#"<h1>Hi {{ name }},</h1>
-<p>Your order <strong>{{ orderId }}</strong> of ${{ amount }} has been confirmed.</p>"#,
-            "Hi {{ name }}, Your order {{ orderId }} of ${{ amount }} has been confirmed.",
-        )),
-        "PASSWORD_RESET" => Ok((
-            "Reset your password",
-            r#"<p>Click <a href="{{ resetLink }}">here</a> to reset your password.</p>"#,
-            "Visit this link to reset your password: {{ resetLink }}",
-        )),
-        "WELCOME" => Ok((
-            "Welcome to {{ appName }}!",
-            r#"<h1>Welcome, {{ name }}!</h1><p>Thanks for joining {{ appName }}.</p>"#,
-            "Welcome, {{ name }}! Thanks for joining {{ appName }}.",
-        )),
+#[cfg(test)]
+mod builtin {
+    // ORDER_CONFIRMATION
+    pub const ORDER_CONFIRMATION_SUBJECT: &str = "Order {{ orderId }} confirmed";
+    pub const ORDER_CONFIRMATION_HTML: &str = "<h1>Hi {{ name }},</h1>\
+        <p>Your order <strong>{{ orderId }}</strong> of ${{ amount }} has been confirmed.</p>";
+    pub const ORDER_CONFIRMATION_TEXT: &str =
+        "Hi {{ name }}, Your order {{ orderId }} of ${{ amount }} has been confirmed.";
 
-        // ── Generic built-ins ─────────────────────────────────────────────────
-        //
-        // GENERIC_TEXT: plain-text email via payload fields `subject` + `body`.
-        "GENERIC_TEXT" => Ok((
-            "{{ subject }}",
-            r#"<div style="font-family:sans-serif;white-space:pre-wrap">{{ body }}</div>"#,
-            "{{ body }}",
-        )),
+    // GENERIC_TEXT
+    pub const GENERIC_TEXT_SUBJECT: &str = "{{ subject }}";
+    pub const GENERIC_TEXT_HTML: &str =
+        r#"<div style="font-family:sans-serif;white-space:pre-wrap">{{ body }}</div>"#;
+    pub const GENERIC_TEXT_BODY: &str = "{{ body }}";
 
-        // GENERIC_HTML: caller supplies pre-rendered HTML in `body_html`.
-        // `| safe` bypasses auto-escaping — the caller owns this HTML and is
-        // responsible for its safety.  `body_text` is the plain-text fallback.
-        "GENERIC_HTML" => Ok((
-            "{{ subject }}",
-            concat!(
-                "<!DOCTYPE html><html>",
-                "<head><meta charset=\"utf-8\">",
-                "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head>",
-                "<body style=\"margin:0;padding:24px;font-family:sans-serif;color:#111\">",
-                "{{ body_html | safe }}",
-                "</body></html>"
-            ),
-            "{{ body_text }}",
-        )),
-
-        other => Err(AppError::Template(format!(
-            "Unknown event type '{other}' — no template registered"
-        ))),
-    }
+    // GENERIC_HTML
+    pub const GENERIC_HTML_SUBJECT: &str = "{{ subject }}";
+    pub const GENERIC_HTML_HTML: &str = concat!(
+        "<!DOCTYPE html><html>",
+        r#"<head><meta charset="utf-8">"#,
+        r#"<meta name="viewport" content="width=device-width,initial-scale=1"></head>"#,
+        r#"<body style="margin:0;padding:24px;font-family:sans-serif;color:#111">"#,
+        "{{ body_html | safe }}",
+        "</body></html>"
+    );
+    pub const GENERIC_HTML_TEXT: &str = "{{ body_text }}";
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -374,76 +350,86 @@ mod tests {
         assert!(out.contains("<li>Gadget — SALE</li>"));
     }
 
-    // ── templates_for integration ─────────────────────────────────────────────
-
-    #[test]
-    fn unknown_event_type_is_template_error() {
-        let err = templates_for("NONEXISTENT").unwrap_err();
-        assert!(matches!(err, AppError::Template(_)));
-    }
+    // ── Built-in template string rendering ───────────────────────────────────
+    //
+    // These tests verify the rendering functions against the same template
+    // strings that are seeded into the `email_template` table by migrations.
+    // They do not test DB access — that is covered by integration tests in
+    // crates/store.
 
     #[test]
     fn order_confirmation_renders() {
-        let (subj, html, text) = templates_for("ORDER_CONFIRMATION").unwrap();
+        use super::builtin::*;
         let payload = json!({"name": "Alice", "orderId": "ORD-1", "amount": "42.00"});
         assert_eq!(
-            render_template(subj, &payload).unwrap(),
+            render_template(ORDER_CONFIRMATION_SUBJECT, &payload).unwrap(),
             "Order ORD-1 confirmed"
         );
-        assert!(render_html_template(html, &payload)
+        assert!(render_html_template(ORDER_CONFIRMATION_HTML, &payload)
             .unwrap()
             .contains("Alice"));
-        assert!(render_template(text, &payload).unwrap().contains("ORD-1"));
+        assert!(render_template(ORDER_CONFIRMATION_TEXT, &payload)
+            .unwrap()
+            .contains("ORD-1"));
     }
 
     #[test]
     fn order_confirmation_escapes_xss_in_name() {
-        let (_, html, _) = templates_for("ORDER_CONFIRMATION").unwrap();
+        use super::builtin::ORDER_CONFIRMATION_HTML;
         let payload = json!({"name": "<script>alert(1)</script>", "orderId": "X", "amount": "0"});
-        let out = render_html_template(html, &payload).unwrap();
+        let out = render_html_template(ORDER_CONFIRMATION_HTML, &payload).unwrap();
         assert!(!out.contains("<script>"));
         assert!(out.contains("&lt;script&gt;"));
     }
 
     #[test]
     fn generic_text_renders() {
-        let (subj, html, text) = templates_for("GENERIC_TEXT").unwrap();
+        use super::builtin::*;
         let payload = json!({"subject": "Hello", "body": "Line one\nLine two"});
-        assert_eq!(render_template(subj, &payload).unwrap(), "Hello");
         assert_eq!(
-            render_template(text, &payload).unwrap(),
+            render_template(GENERIC_TEXT_SUBJECT, &payload).unwrap(),
+            "Hello"
+        );
+        assert_eq!(
+            render_template(GENERIC_TEXT_BODY, &payload).unwrap(),
             "Line one\nLine two"
         );
-        assert!(render_html_template(html, &payload)
+        assert!(render_html_template(GENERIC_TEXT_HTML, &payload)
             .unwrap()
             .contains("Line one\nLine two"));
     }
 
     #[test]
     fn generic_html_passes_body_html_verbatim() {
-        let (subj, html, text) = templates_for("GENERIC_HTML").unwrap();
+        use super::builtin::*;
         let payload = json!({
             "subject":   "Your invoice",
             "body_html": "<p>Please find your invoice attached.</p>",
             "body_text": "Please find your invoice attached.",
         });
-        assert_eq!(render_template(subj, &payload).unwrap(), "Your invoice");
-        let rendered = render_html_template(html, &payload).unwrap();
+        assert_eq!(
+            render_template(GENERIC_HTML_SUBJECT, &payload).unwrap(),
+            "Your invoice"
+        );
+        let rendered = render_html_template(GENERIC_HTML_HTML, &payload).unwrap();
         assert!(
             rendered.contains("<p>Please find your invoice attached.</p>"),
             "body_html must arrive verbatim via | safe, not escaped: {rendered}"
         );
         assert!(rendered.contains("<body"));
         assert_eq!(
-            render_template(text, &payload).unwrap(),
+            render_template(GENERIC_HTML_TEXT, &payload).unwrap(),
             "Please find your invoice attached."
         );
     }
 
     #[test]
     fn generic_html_subject_is_plain_text_no_escaping() {
-        let (subj, _, _) = templates_for("GENERIC_HTML").unwrap();
+        use super::builtin::GENERIC_HTML_SUBJECT;
         let payload = json!({"subject": "Hello & Goodbye", "body_html": "", "body_text": ""});
-        assert_eq!(render_template(subj, &payload).unwrap(), "Hello & Goodbye");
+        assert_eq!(
+            render_template(GENERIC_HTML_SUBJECT, &payload).unwrap(),
+            "Hello & Goodbye"
+        );
     }
 }
