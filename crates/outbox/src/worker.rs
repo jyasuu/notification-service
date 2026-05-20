@@ -1,6 +1,9 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use common::{
+    ChannelOverrides, EmailOptions, FromOverride, Metadata, NotificationEvent, Recipient, SendMode,
+};
 use lapin::{
     options::*, types::FieldTable, BasicProperties, Channel, Connection, ConnectionProperties,
 };
@@ -285,35 +288,93 @@ async fn publish_and_mark(
     cfg: &OutboxConfig,
     row: &OutboxRow,
 ) -> anyhow::Result<()> {
-    // Build the canonical EmailEvent JSON.
+    // Build the canonical NotificationEvent envelope from the outbox row payload.
     //
-    // Backwards-compatible promotion:
-    //   Legacy payload: { "recipient": {...}, "payload": {...} }
-    //   New payload:    { "recipients": [...], "payload": {...} }
+    // Business services write email-specific fields at the top level of the
+    // outbox payload JSON:
     //
-    // If the outbox row was written with a singular "recipient" key (old
-    // business service), we wrap it in a one-element array so the consumer's
-    // deserializer always receives the array form.  If "recipients" is already
-    // present (new business service), we forward it verbatim.
-    let recipients = promote_recipients(&row.payload);
+    //   {
+    //     "recipients":    [{ "email": "...", "name": "..." }],  // or singular "recipient"
+    //     "payload":       { ...template vars... },
+    //     "from_override": { "email": "...", "name": "..." },    // optional
+    //     "attachments":   [{ "url": "...", ... }],              // optional
+    //     "cc":            [{ "email": "...", "name": "..." }],  // optional
+    //     "bcc":           [{ "email": "...", "name": "..." }],  // optional
+    //     "sender_account": "transactional",                     // optional
+    //     "metadata":      { "source": "orders-service" }        // optional
+    //   }
+    //
+    // Backwards-compatible recipient promotion:
+    //   Legacy payload: { "recipient": {...} }     → one-element Vec
+    //   New payload:    { "recipients": [...] }    → forwarded verbatim
+    let recipients: Vec<Recipient> =
+        serde_json::from_value(promote_recipients(&row.payload)).unwrap_or_default();
 
-    let event = serde_json::json!({
-        "event_id":      row.event_id,
-        "timestamp":     chrono::Utc::now().to_rfc3339(),
-        "event_type":    row.event_type,
-        "recipients":    recipients,
-        "payload":       row.payload.get("payload").cloned().unwrap_or(serde_json::Value::Object(Default::default())),
-        // Forward optional per-event sender override from the outbox payload.
-        // Business service writes: { "from_override": { "email": "...", "name": "..." } }
-        "from_override": row.payload.get("from_override").cloned().unwrap_or(serde_json::Value::Null),
-        "metadata":      row.payload.get("metadata").cloned().unwrap_or(serde_json::Value::Null),
-        // Forward attachment URL references so the consumer can fetch and attach
-        // files at send time.  Business service writes:
-        //   { "attachments": [{ "url": "...", "filename": "...", "content_type": "..." }] }
-        // An absent key is promoted to an empty array — the consumer treats both
-        // identically (no attachments).
-        "attachments":   row.payload.get("attachments").cloned().unwrap_or(serde_json::Value::Array(vec![])),
-    });
+    let from_override: Option<FromOverride> = row
+        .payload
+        .get("from_override")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+    let attachments = row
+        .payload
+        .get("attachments")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let cc: Vec<Recipient> = row
+        .payload
+        .get("cc")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let bcc: Vec<Recipient> = row
+        .payload
+        .get("bcc")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let sender_account: Option<String> = row
+        .payload
+        .get("sender_account")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+
+    let send_mode: SendMode = row
+        .payload
+        .get("send_mode")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default(); // defaults to SendMode::Individual
+
+    let metadata: Metadata = row
+        .payload
+        .get("metadata")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let template_payload = row
+        .payload
+        .get("payload")
+        .cloned()
+        .unwrap_or(serde_json::Value::Object(Default::default()));
+
+    let event = NotificationEvent {
+        event_id: row.event_id,
+        timestamp: chrono::Utc::now(),
+        event_type: row.event_type.clone(),
+        payload: template_payload,
+        metadata,
+        channel_overrides: ChannelOverrides {
+            email: Some(EmailOptions {
+                send_mode,
+                recipients,
+                cc,
+                bcc,
+                from_override,
+                attachments,
+                sender_account,
+            }),
+        },
+    };
 
     let body = serde_json::to_vec(&event)?;
 
@@ -501,6 +562,124 @@ mod tests {
         let arr = result.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["email"], "new@example.com");
+    }
+
+    // ── outbox payload → NotificationEvent field extraction ──────────────────
+    //
+    // These tests exercise the field-extraction logic in `publish_and_mark`
+    // (the parts that don't require a real DB / AMQP connection) by calling
+    // the same helpers directly.
+
+    /// cc and bcc arrays are parsed from the outbox payload when present.
+    #[test]
+    fn outbox_payload_cc_bcc_are_extracted() {
+        let payload = json!({
+            "recipients": [{"email": "to@example.com"}],
+            "payload": {},
+            "cc":  [{"email": "cc@example.com",  "name": "CC User"}],
+            "bcc": [{"email": "bcc@example.com", "name": null}]
+        });
+
+        let cc: Vec<common::Recipient> = payload
+            .get("cc")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let bcc: Vec<common::Recipient> = payload
+            .get("bcc")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        assert_eq!(cc.len(), 1);
+        assert_eq!(cc[0].email, "cc@example.com");
+        assert_eq!(bcc.len(), 1);
+        assert_eq!(bcc[0].email, "bcc@example.com");
+    }
+
+    /// cc and bcc default to empty vecs when absent from the payload.
+    #[test]
+    fn outbox_payload_cc_bcc_absent_gives_empty_vec() {
+        let payload = json!({"recipients": [{"email": "to@example.com"}], "payload": {}});
+
+        let cc: Vec<common::Recipient> = payload
+            .get("cc")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let bcc: Vec<common::Recipient> = payload
+            .get("bcc")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        assert!(cc.is_empty());
+        assert!(bcc.is_empty());
+    }
+
+    /// sender_account is extracted from the payload when present.
+    #[test]
+    fn outbox_payload_sender_account_is_extracted() {
+        let payload = json!({
+            "recipients": [{"email": "to@example.com"}],
+            "payload": {},
+            "sender_account": "transactional"
+        });
+
+        let account: Option<String> = payload
+            .get("sender_account")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+
+        assert_eq!(account, Some("transactional".to_owned()));
+    }
+
+    /// The assembled NotificationEvent serializes all email fields inside
+    /// channel_overrides.email — not at the top level.
+    #[test]
+    fn assembled_event_uses_channel_overrides_shape() {
+        use common::{ChannelOverrides, EmailOptions, Metadata, NotificationEvent, Recipient};
+        use uuid::Uuid;
+
+        let event = NotificationEvent {
+            event_id: Uuid::nil(),
+            timestamp: chrono::Utc::now(),
+            event_type: "TEST".into(),
+            payload: json!({}),
+            metadata: Metadata::default(),
+            channel_overrides: ChannelOverrides {
+                email: Some(EmailOptions {
+                    recipients: vec![Recipient {
+                        email: "to@example.com".into(),
+                        name: None,
+                    }],
+                    cc: vec![Recipient {
+                        email: "cc@example.com".into(),
+                        name: None,
+                    }],
+                    bcc: vec![Recipient {
+                        email: "bcc@example.com".into(),
+                        name: None,
+                    }],
+                    from_override: None,
+                    attachments: vec![],
+                    sender_account: Some("transactional".into()),
+                    send_mode: common::SendMode::Individual,
+                }),
+            },
+        };
+
+        let v = serde_json::to_value(&event).unwrap();
+
+        // Fields must live inside channel_overrides.email, NOT at the top level.
+        assert!(
+            v.get("recipients").is_none(),
+            "recipients must not be top-level"
+        );
+        assert!(v.get("cc").is_none(), "cc must not be top-level");
+        assert!(v.get("bcc").is_none(), "bcc must not be top-level");
+
+        let email = &v["channel_overrides"]["email"];
+        assert_eq!(email["recipients"][0]["email"], "to@example.com");
+        assert_eq!(email["cc"][0]["email"], "cc@example.com");
+        assert_eq!(email["bcc"][0]["email"], "bcc@example.com");
+        assert_eq!(email["sender_account"], "transactional");
     }
 
     // ── record_publish_failure thresholds ─────────────────────────────────────

@@ -211,7 +211,60 @@ psql "$BUSINESS_DATABASE_URL" -f migrations/business_db/0005_outbox_from_overrid
 psql "$BUSINESS_DATABASE_URL" -f migrations/business_db/0006_outbox_fail_count.sql
 psql "$BUSINESS_DATABASE_URL" -f migrations/business_db/0008_outbox_attachments.sql
 psql "$BUSINESS_DATABASE_URL" -f migrations/business_db/0016_outbox_locked_at.sql
+psql "$BUSINESS_DATABASE_URL" -f migrations/business_db/0021_send_notification_fn_cc_bcc.sql
 ```
+
+### Sending email from a Postgres function
+
+After applying the migrations, call `notify_send_email()` from any business transaction:
+
+```sql
+-- Single TO, with CC and BCC
+SELECT notify_send_email(
+  p_event_type => 'ORDER_CONFIRMATION',
+  p_recipient  => '{"email":"alice@example.com","name":"Alice"}',
+  p_cc         => '[{"email":"manager@example.com","name":"Bob"}]',
+  p_bcc        => '[{"email":"audit@example.com"}]',
+  p_payload    => '{"orderId":"123","amount":"99.00"}'
+);
+
+-- Multiple TO recipients, multiple CC, BCC to compliance
+SELECT notify_send_email(
+  p_event_type => 'INVOICE_READY',
+  p_recipients => '[
+    {"email":"alice@acme.com","name":"Alice"},
+    {"email":"finance@acme.com","name":"Finance"}
+  ]',
+  p_cc         => '[
+    {"email":"manager@acme.com","name":"Carol"},
+    {"email":"cfo@acme.com","name":"David"}
+  ]',
+  p_bcc        => '[{"email":"compliance@acme.com"}]',
+  p_payload    => '{"invoiceId":"INV-42","amount":"5000.00"}',
+  p_from_override => '{"email":"billing@acme.com","name":"Acme Billing"}',
+  p_event_id   => 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid
+);
+```
+
+**Parameter reference**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+|  |  | ✓ | Template key, e.g.  |
+|  |  | one of these | Single TO object:  |
+|  |  | one of these | Array of TO objects |
+|  |  | — | Array of CC objects;  = no CC |
+|  |  | — | Array of BCC objects;  = no BCC |
+|  |  | — | Template variables, default  |
+|  |  | — | Custom From:  |
+|  |  | — | Array of  |
+|  |  | — | Forwarded verbatim; useful for tracing |
+|  |  | — | Idempotency key; auto-generated if omitted |
+
+> **CC/BCC semantics:** CC and BCC addresses are included in every delivery for
+> the event but do not get their own  rows. They bypass the recipient
+> filter, the rate-limiter, and per-address retry. An invalid address in either
+> list fails the entire delivery permanently.
 
 ## Known limitations
 

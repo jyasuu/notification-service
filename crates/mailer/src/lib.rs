@@ -7,7 +7,7 @@ pub mod template;
 pub mod webhook;
 
 pub use fetcher::{fetch_attachments, fetch_attachments_with_limit};
-pub use message::{EmailMessage, ResolvedAttachment};
+pub use message::{EmailMessage, MailboxRef, ResolvedAttachment};
 pub use registry::SenderRegistry;
 pub use sender::EmailSender;
 pub use smtp::{SmtpSender, SmtpTlsMode};

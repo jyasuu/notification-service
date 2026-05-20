@@ -1,12 +1,30 @@
 use thiserror::Error;
 
+/// Whether a [`AppError::Mailer`] failure should be retried.
+///
+/// Using an explicit field instead of a string prefix makes the intent
+/// self-documenting and removes the risk of a typo silently turning a
+/// permanent error into a retryable one (or vice versa).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailerKind {
+    /// Transient failure (network hiccup, 5xx, …) — will be retried.
+    Transient,
+    /// Permanent failure (bad address, invalid template, …) — goes to DLQ.
+    Permanent,
+}
+
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 
-    #[error("mailer error: {0}")]
-    Mailer(String),
+    /// Mailer failure with explicit retry semantics.
+    ///
+    /// Use [`AppError::permanent_mailer`] / [`AppError::transient_mailer`]
+    /// rather than constructing this variant directly.  Check permanence with
+    /// [`AppError::is_permanent_mailer`] rather than inspecting `kind`.
+    #[error("mailer error: {message}")]
+    Mailer { message: String, kind: MailerKind },
 
     /// Permanent failure: bad template, unknown event type, etc.
     /// Never retried — goes straight to DLQ.
@@ -40,4 +58,33 @@ pub enum AppError {
     /// added a new status without a matching code update, or data corruption.
     #[error("unknown email status value in database: '{0}'")]
     UnknownStatus(String),
+}
+
+impl AppError {
+    /// Construct a permanent (non-retryable) `Mailer` error.
+    pub fn permanent_mailer(msg: impl Into<String>) -> Self {
+        AppError::Mailer {
+            message: msg.into(),
+            kind: MailerKind::Permanent,
+        }
+    }
+
+    /// Construct a transient (retryable) `Mailer` error.
+    pub fn transient_mailer(msg: impl Into<String>) -> Self {
+        AppError::Mailer {
+            message: msg.into(),
+            kind: MailerKind::Transient,
+        }
+    }
+
+    /// Returns `true` when this is a permanent (non-retryable) `Mailer` error.
+    pub fn is_permanent_mailer(&self) -> bool {
+        matches!(
+            self,
+            AppError::Mailer {
+                kind: MailerKind::Permanent,
+                ..
+            }
+        )
+    }
 }

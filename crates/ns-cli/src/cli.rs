@@ -37,7 +37,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Publish a new email event directly to RabbitMQ.
-    Send(SendArgs),
+    Send(Box<SendArgs>),
 
     /// Show delivery status for an event (all recipients or one).
     Status(StatusArgs),
@@ -46,7 +46,7 @@ pub enum Command {
     Retry(RetryArgs),
 
     /// List recent email_log rows with optional filters.
-    Logs(LogsArgs),
+    Logs(Box<LogsArgs>),
 
     /// Inspect the business-service outbox table.
     Outbox(OutboxArgs),
@@ -78,6 +78,21 @@ pub struct SendArgs {
     /// Display name for the recipient(s). Repeat in the same order as --to.
     #[arg(long)]
     pub name: Vec<String>,
+
+    /// CC recipient email address(es). Visible to all recipients as `Cc:` headers.
+    /// Repeat for multiple addresses:
+    ///   --cc manager@example.com --cc auditor@example.com
+    ///
+    /// CC addresses are not independently tracked, filtered, or retried.
+    #[arg(long)]
+    pub cc: Vec<String>,
+
+    /// BCC recipient email address(es). Hidden from other recipients.
+    /// Repeat for multiple addresses.
+    ///
+    /// BCC addresses are not independently tracked, filtered, or retried.
+    #[arg(long)]
+    pub bcc: Vec<String>,
 
     /// Template payload as a JSON string or a path to a JSON file (prefix with @).
     ///   --payload '{"orderId":"123"}'

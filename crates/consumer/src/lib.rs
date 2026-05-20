@@ -6,4 +6,5 @@ pub mod runner;
 mod tests;
 
 pub use config::ConsumerConfig;
+pub use processor::ProcessorContext;
 pub use runner::run_consumer;

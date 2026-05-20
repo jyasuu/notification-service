@@ -3,7 +3,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use common::AppError;
+use common::{AppError, MailerKind};
 use serde_json::json;
 
 pub struct ApiError(pub AppError);
@@ -20,10 +20,10 @@ impl IntoResponse for ApiError {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::Duplicate(msg) => (StatusCode::CONFLICT, msg.clone()),
             AppError::Template(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg.clone()),
-            // Permanent mailer errors (prefixed "permanent:") represent a bad
-            // request that will never succeed — return 422 so callers know not
-            // to retry without fixing the underlying data.
-            AppError::Mailer(msg) if msg.starts_with("permanent:") => {
+            // Permanent mailer errors represent a bad request that will never
+            // succeed — return 422 so callers know not to retry without fixing
+            // the underlying data.
+            AppError::Mailer { message: msg, kind: MailerKind::Permanent } => {
                 (StatusCode::UNPROCESSABLE_ENTITY, msg.clone())
             }
             AppError::Blocked(msg) => (StatusCode::BAD_REQUEST, msg.clone()),

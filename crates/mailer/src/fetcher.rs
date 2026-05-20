@@ -21,15 +21,16 @@
 //!
 //! | Failure | Error type | Retried |
 //! |---|---|---|
-//! | 4xx (bad URL, expired, forbidden) | `permanent:` prefix | No |
-//! | 5xx (server error) | transient | Yes (up to FETCH_MAX_RETRIES) |
-//! | Timeout / network error | transient | Yes |
-//! | Response too large | `permanent:` prefix | No |
-//! | URL already expired (`max_age_secs`) | `permanent:` prefix | No |
+//! | 4xx (bad URL, expired, forbidden) | `Permanent` | No |
+//! | 5xx (server error) | `Transient` | Yes (up to FETCH_MAX_RETRIES) |
+//! | Timeout / network error | `Transient` | Yes |
+//! | Response too large | `Permanent` | No |
+//! | URL already expired (`max_age_secs`) | `Permanent` | No |
 //! | All retries exhausted | last transient error | No further retries |
 
 use common::{AppError, AttachmentRef};
 use futures::future::join_all;
+use metrics::{counter, histogram};
 use reqwest::{Client, StatusCode};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, instrument, warn};
@@ -70,7 +71,7 @@ pub async fn fetch_attachments_with_limit(
     for att_ref in refs {
         att_ref
             .validate(event_timestamp)
-            .map_err(AppError::Mailer)?;
+            .map_err(AppError::permanent_mailer)?;
     }
 
     // ── 2. Fetch all URLs concurrently, each with independent retry ───────────
@@ -78,11 +79,6 @@ pub async fn fetch_attachments_with_limit(
     // `join_all` (not `try_join_all`) is used here so every attachment gets
     // its own retry budget. A transient 5xx on attachment B no longer cancels
     // the already-in-flight fetch for attachment A.
-    //
-    // Each element of `results` is `Result<ResolvedAttachment, AppError>`.
-    // We collect all results first and then surface the first error (if any)
-    // so the caller still gets a clean `Err` when any attachment ultimately
-    // fails after exhausting retries.
     let futures: Vec<_> = refs
         .iter()
         .map(|att_ref| fetch_one_with_retry(client, att_ref, max_bytes))
@@ -90,13 +86,46 @@ pub async fn fetch_attachments_with_limit(
 
     let results = join_all(futures).await;
 
-    // Surface the first error; collect resolved attachments in order.
+    // ── 3. Collect results, preserving per-error permanence ──────────────────
+    //
+    // Instead of surfacing the first error regardless of type, we check all
+    // results so the caller can make a correct requeue decision:
+    //   • If ANY error is transient → requeue (we may succeed on retry).
+    //   • Only if ALL errors are permanent → no requeue (retrying is pointless).
+    //
+    // We collect resolved attachments and errors separately so we can inspect
+    // the full error set before deciding which error to surface to the caller.
     let mut resolved = Vec::with_capacity(refs.len());
+    let mut errors: Vec<AppError> = Vec::new();
+
     for result in results {
-        resolved.push(result?);
+        match result {
+            Ok(att) => resolved.push(att),
+            Err(e) => errors.push(e),
+        }
     }
 
-    Ok(resolved)
+    if errors.is_empty() {
+        return Ok(resolved);
+    }
+
+    // Surface a transient error if any exist, so the caller's `is_permanent_mailer()`
+    // check correctly triggers a requeue rather than DLQ-ing an event that might
+    // succeed on retry once a flaky storage server recovers.
+    // If all errors are permanent, surface the first permanent one.
+    let representative = errors
+        .into_iter()
+        .reduce(|acc, e| {
+            // Prefer transient over permanent so the caller requeues.
+            if acc.is_permanent_mailer() && !e.is_permanent_mailer() {
+                e
+            } else {
+                acc
+            }
+        })
+        .expect("errors is non-empty");
+
+    Err(representative)
 }
 
 /// Fetch a single attachment, retrying on transient failures.
@@ -109,6 +138,7 @@ async fn fetch_one_with_retry(
     max_bytes: usize,
 ) -> Result<ResolvedAttachment, AppError> {
     let mut last_err = None;
+    let fetch_start = std::time::Instant::now();
 
     for attempt in 0..=FETCH_MAX_RETRIES {
         if attempt > 0 {
@@ -119,30 +149,33 @@ async fn fetch_one_with_retry(
                 delay_secs = delay.as_secs(),
                 "Attachment fetch transient failure — retrying"
             );
+            counter!("attachment_fetch_retries_total").increment(1);
             sleep(delay).await;
         }
 
         match fetch_one(client, att_ref, max_bytes).await {
             Ok(data) => {
+                let elapsed = fetch_start.elapsed().as_secs_f64();
+                histogram!("attachment_fetch_duration_seconds").record(elapsed);
+                counter!("attachment_fetch_total", "result" => "success").increment(1);
                 return Ok(ResolvedAttachment {
                     filename: att_ref.filename.clone(),
                     content_type: att_ref.content_type.clone(),
                     data,
-                })
+                });
             }
             // Permanent errors are returned immediately — no retry.
-            // We borrow `m` only to copy the message string, then construct
-            // an owned error to return (AppError doesn't implement Clone).
-            Err(AppError::Mailer(ref m)) if m.starts_with("permanent:") => {
-                let msg = m.clone();
-                return Err(AppError::Mailer(msg));
+            Err(e) if e.is_permanent_mailer() => {
+                counter!("attachment_fetch_total", "result" => "permanent_failure").increment(1);
+                return Err(e);
             }
             Err(e) => last_err = Some(e),
         }
     }
 
+    counter!("attachment_fetch_total", "result" => "transient_failure").increment(1);
     Err(last_err.unwrap_or_else(|| {
-        AppError::Mailer(format!(
+        AppError::transient_mailer(format!(
             "attachment '{}' fetch failed after {FETCH_MAX_RETRIES} retries",
             att_ref.filename
         ))
@@ -165,7 +198,7 @@ async fn fetch_one(
     }
 
     let resp = req.send().await.map_err(|e| {
-        AppError::Mailer(format!(
+        AppError::transient_mailer(format!(
             "attachment fetch network error '{}': {e}",
             att_ref.filename
         ))
@@ -184,15 +217,15 @@ async fn fetch_one(
 
     // 4xx → permanent: bad URL, expired pre-signed URL, access denied, etc.
     if status.is_client_error() {
-        return Err(AppError::Mailer(format!(
-            "permanent: attachment '{}' fetch returned HTTP {status} ({})",
+        return Err(AppError::permanent_mailer(format!(
+            "attachment '{}' fetch returned HTTP {status} ({})",
             att_ref.filename, att_ref.url
         )));
     }
 
     // 5xx → transient: upstream server problem, safe to retry.
     if status.is_server_error() {
-        return Err(AppError::Mailer(format!(
+        return Err(AppError::transient_mailer(format!(
             "attachment '{}' fetch returned HTTP {status} — will retry",
             att_ref.filename
         )));
@@ -200,12 +233,12 @@ async fn fetch_one(
 
     // Read body with size cap to prevent memory exhaustion.
     let bytes = resp.bytes().await.map_err(|e| {
-        AppError::Mailer(format!("attachment '{}' read error: {e}", att_ref.filename))
+        AppError::transient_mailer(format!("attachment '{}' read error: {e}", att_ref.filename))
     })?;
 
     if bytes.len() > max_bytes {
-        return Err(AppError::Mailer(format!(
-            "permanent: attachment '{}' exceeds size limit ({} > {} bytes)",
+        return Err(AppError::permanent_mailer(format!(
+            "attachment '{}' exceeds size limit ({} > {} bytes)",
             att_ref.filename,
             bytes.len(),
             max_bytes
@@ -235,20 +268,20 @@ mod tests {
     fn validate_rejects_empty_url() {
         let mut a = att_ref("https://example.com/file.pdf");
         a.url = "".into();
-        assert!(a.validate(&Utc::now()).unwrap_err().contains("permanent:"));
+        assert!(a.validate(&Utc::now()).is_err());
     }
 
     #[test]
     fn validate_rejects_non_http_url() {
         let a = att_ref("ftp://example.com/file.pdf");
-        assert!(a.validate(&Utc::now()).unwrap_err().contains("permanent:"));
+        assert!(a.validate(&Utc::now()).is_err());
     }
 
     #[test]
     fn validate_rejects_path_separator_in_filename() {
         let mut a = att_ref("https://example.com/file.pdf");
         a.filename = "../../etc/passwd".into();
-        assert!(a.validate(&Utc::now()).unwrap_err().contains("permanent:"));
+        assert!(a.validate(&Utc::now()).is_err());
     }
 
     #[test]

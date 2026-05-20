@@ -38,6 +38,8 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
 tokio-util = { version = "0.7" }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+openssl = { version = "0.10", features = ["vendored"] }
 
 [package]
 name = "anvil-notify"
@@ -69,7 +71,9 @@ tracing-subscriber = { workspace = true }
 anyhow      = { workspace = true }
 serde       = { workspace = true }
 tokio-util  = { workspace = true }
+reqwest     = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+openssl     = { workspace = true }
 sqlx        = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "macros", "migrate"] }
 axum        = "0.8"
 
@@ -78,7 +82,7 @@ config = "0.14"
 
 
 [profile.release]
-opt-level = "s"      # Optimize for size ("z" is even more aggressive, but "s" preserves performance)
+opt-level = 3        # Default performance optimisation; "s"/"z" are for embedded/binary-size targets
 lto = true           # Enable Link-Time Optimization (removes dead code across crates)
 codegen-units = 1    # Reduces parallel generation, allowing deeper size optimization
 strip = true         # Automatically strip symbols and debug info (this is the massive space saver)

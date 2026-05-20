@@ -83,6 +83,34 @@ pub struct EmailLog {
     /// NULL means the global [mailer] default was used.
     /// Nullable for rows written before migration 0014.
     pub sender_account: Option<String>,
+    /// CC recipients stored for retry reconstruction.
+    /// JSON array of `{"email": "...", "name": "..."}` objects, or NULL.
+    /// Nullable for rows written before migration 0020.
+    pub cc: Option<serde_json::Value>,
+    /// BCC recipients stored for retry reconstruction.
+    /// JSON array of `{"email": "...", "name": "..."}` objects, or NULL.
+    /// Nullable for rows written before migration 0020.
+    pub bcc: Option<serde_json::Value>,
+    /// Delivery mode of the original event: `"individual"` or `"group"`.
+    ///
+    /// Stored so manual retries via the HTTP API faithfully replay the
+    /// original behaviour.  Without this, group-mode events (all recipients
+    /// share one email) would be incorrectly retried as individual-mode
+    /// (separate email per address), silently changing what recipients see.
+    ///
+    /// Nullable for rows written before migration 0023; treated as
+    /// `SendMode::Individual` on retry (same default as before group-mode
+    /// was introduced).
+    pub send_mode: Option<String>,
+    /// The `NotificationEvent.timestamp` written by the business service.
+    ///
+    /// Distinct from `created_at` (the DB insertion time).  Used by
+    /// `republish_event()` for attachment expiry checks so the consumer and
+    /// API agree on what "expired" means regardless of queue or processing lag.
+    ///
+    /// Nullable for rows written before migration 0023; `republish_event()`
+    /// falls back to `created_at` as a proxy for those legacy rows.
+    pub event_timestamp: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

@@ -3,7 +3,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use common::AppError;
 use lettre::{
-    message::{header::ContentType, Attachment as LettreAttachment, MultiPart, SinglePart},
+    message::{
+        header::ContentType, Attachment as LettreAttachment, Mailbox, MultiPart, SinglePart,
+    },
     transport::smtp::authentication::Credentials,
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
@@ -203,7 +205,9 @@ impl SmtpSender {
         macro_rules! build_transport {
             ($builder:expr) => {{
                 let b = $builder
-                    .map_err(|e: lettre::transport::smtp::Error| AppError::Mailer(e.to_string()))?
+                    .map_err(|e: lettre::transport::smtp::Error| {
+                        AppError::transient_mailer(e.to_string())
+                    })?
                     .port(cfg.port)
                     .timeout(Some(cfg.connection_timeout))
                     .pool_config(
@@ -268,23 +272,34 @@ impl SmtpSender {
 
 #[async_trait]
 impl EmailSender for SmtpSender {
-    #[instrument(skip(self, msg), fields(event_id = %msg.event_id, to = %msg.to_email))]
+    #[instrument(skip(self, msg), fields(event_id = %msg.event_id, to = %msg.to_email, to_extra = msg.to_extra.len()))]
     async fn send(&self, msg: &EmailMessage) -> Result<(), AppError> {
         let from_email = msg
             .from_email_override
             .as_deref()
             .unwrap_or(&self.from_email);
         let from_name = msg.from_name_override.as_deref().unwrap_or(&self.from_name);
-        let from = format!("{from_name} <{from_email}>")
-            .parse()
-            .map_err(|e: lettre::address::AddressError| AppError::Mailer(e.to_string()))?;
+        let from = format_mailbox(from_email, Some(from_name))
+            .map_err(|e| AppError::transient_mailer(e.to_string()))?;
 
-        let to = match &msg.to_name {
-            Some(name) => format!("{name} <{}>", msg.to_email),
-            None => msg.to_email.clone(),
-        }
-        .parse()
-        .map_err(|e: lettre::address::AddressError| AppError::Mailer(e.to_string()))?;
+        let to = format_mailbox(&msg.to_email, msg.to_name.as_deref())
+            .map_err(|e| AppError::transient_mailer(e.to_string()))?;
+
+        // Parse cc / bcc address lists before touching the body builder so a
+        // bad address fails early with a clear permanent error.
+        let cc_addrs = msg
+            .cc
+            .iter()
+            .map(|r| format_mailbox(&r.email, r.name.as_deref()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::permanent_mailer(format!("invalid cc address: {e}")))?;
+
+        let bcc_addrs = msg
+            .bcc
+            .iter()
+            .map(|r| format_mailbox(&r.email, r.name.as_deref()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::permanent_mailer(format!("invalid bcc address: {e}")))?;
 
         // ── Build text+html alternative ───────────────────────────────────────
         let alternative = MultiPart::alternative()
@@ -315,8 +330,8 @@ impl EmailSender for SmtpSender {
             for att in &msg.attachments {
                 // Bytes are already fetched and validated by AttachmentFetcher.
                 let content_type = att.content_type.parse::<ContentType>().map_err(|e| {
-                    AppError::Mailer(format!(
-                        "permanent: attachment '{}' has invalid content-type '{}': {e}",
+                    AppError::permanent_mailer(format!(
+                        "attachment '{}' has invalid content-type '{}': {e}",
                         att.filename, att.content_type
                     ))
                 })?;
@@ -329,12 +344,31 @@ impl EmailSender for SmtpSender {
             mixed
         };
 
-        let email = Message::builder()
-            .from(from)
-            .to(to)
+        // ── Parse extra To: addresses for group sends ─────────────────────
+        // In individual mode to_extra is empty and this is a no-op.
+        let to_extra_addrs = msg
+            .to_extra
+            .iter()
+            .map(|r| format_mailbox(&r.email, r.name.as_deref()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::permanent_mailer(format!("invalid to address: {e}")))?;
+
+        let mut builder = Message::builder().from(from).to(to);
+
+        for addr in to_extra_addrs {
+            builder = builder.to(addr);
+        }
+        for addr in cc_addrs {
+            builder = builder.cc(addr);
+        }
+        for addr in bcc_addrs {
+            builder = builder.bcc(addr);
+        }
+
+        let email = builder
             .subject(&msg.subject)
             .multipart(body)
-            .map_err(|e| AppError::Mailer(e.to_string()))?;
+            .map_err(|e| AppError::transient_mailer(e.to_string()))?;
 
         self.transport
             .send(email)
@@ -343,10 +377,30 @@ impl EmailSender for SmtpSender {
 
         info!(
             event_id    = %msg.event_id,
+            to_extra    = msg.to_extra.len(),
             attachments = msg.attachments.len(),
+            cc          = msg.cc.len(),
+            bcc         = msg.bcc.len(),
             "Email sent via SMTP"
         );
         Ok(())
+    }
+}
+
+// ── Address formatting ────────────────────────────────────────────────────────
+
+/// Format an email address as a lettre `Mailbox`.
+///
+/// When a display name is supplied the result is `"Name <addr>"`;
+/// when absent it is just `"addr"`. Returns an `AddressError` on parse failure
+/// so callers can map it to the appropriate `AppError` variant.
+fn format_mailbox(
+    email: &str,
+    name: Option<&str>,
+) -> Result<Mailbox, lettre::address::AddressError> {
+    match name {
+        Some(n) if !n.is_empty() => format!("{n} <{email}>").parse(),
+        _ => email.parse(),
     }
 }
 
@@ -356,23 +410,23 @@ fn classify_smtp_error(err: lettre::transport::smtp::Error) -> AppError {
     if err.is_permanent() {
         // 5xx response: bad recipient, auth failure, policy rejection, etc.
         // Will never succeed on retry — route straight to DLQ.
-        AppError::Mailer(format!("permanent: SMTP {err}"))
+        AppError::permanent_mailer(format!("SMTP {err}"))
     } else if err.is_transient() {
         // 4xx response: server busy, quota, greylisting — retry later.
         warn!(smtp_error = %err, "SMTP 4xx transient — treating as rate-limited");
         AppError::RateLimited(format!("SMTP transient: {err}"))
     } else if err.is_timeout() || err.is_tls() {
         // Network-level failures — transient, worth retrying.
-        AppError::Mailer(err.to_string())
+        AppError::transient_mailer(err.to_string())
     } else if err.is_client() {
         // Client-side error (invalid address format, builder error) — permanent.
-        AppError::Mailer(format!("permanent: SMTP client error: {err}"))
+        AppError::permanent_mailer(format!("SMTP client error: {err}"))
     } else {
         // Unknown / transport shutdown — treat as transient.
-        AppError::Mailer(err.to_string())
+        AppError::transient_mailer(err.to_string())
     }
 }
 
 pub fn is_permanent_smtp_error(err: &AppError) -> bool {
-    matches!(err, AppError::Mailer(m) if m.starts_with("permanent:"))
+    err.is_permanent_mailer()
 }

@@ -42,10 +42,10 @@ async fn main() -> Result<()> {
     let fmt = cli.output;
 
     match cli.command {
-        Command::Send(args) => cmd::send::run(args, cfg).await,
+        Command::Send(args) => cmd::send::run(*args, cfg).await,
         Command::Status(args) => cmd::status::run(args, cfg, fmt).await,
         Command::Retry(args) => cmd::retry::run(args, cfg).await,
-        Command::Logs(args) => cmd::logs::run(args, cfg, fmt).await,
+        Command::Logs(args) => cmd::logs::run(*args, cfg, fmt).await,
         Command::Outbox(args) => cmd::outbox::run(args, cfg, fmt).await,
         Command::Template(args) => cmd::template::run(args, cfg, fmt).await,
         Command::Health(args) => cmd::health::run(args, cfg).await,

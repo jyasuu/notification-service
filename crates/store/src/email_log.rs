@@ -13,6 +13,32 @@ pub enum InsertResult {
     Duplicate { retry_count: i32, status: String },
 }
 
+/// Arguments for [`EmailLogStore::insert_pending`].
+///
+/// Using a named struct instead of 10 positional parameters makes call sites
+/// self-documenting and makes future field additions (e.g. a new stored column)
+/// a one-line struct change rather than a signature change at every call site.
+pub struct InsertPendingArgs<'a> {
+    pub event_id: Uuid,
+    pub event_type: &'a str,
+    pub recipient_email: &'a str,
+    pub recipient_name: Option<&'a str>,
+    pub payload: &'a serde_json::Value,
+    pub from_override: Option<&'a serde_json::Value>,
+    pub attachments: Option<&'a serde_json::Value>,
+    pub sender_account: Option<&'a str>,
+    pub cc: Option<&'a serde_json::Value>,
+    pub bcc: Option<&'a serde_json::Value>,
+    /// Delivery mode of the original event (`"individual"` or `"group"`).
+    /// Stored so `republish_event()` can faithfully replay the original mode
+    /// rather than defaulting every retry to `Individual`.
+    pub send_mode: &'a str,
+    /// The original `NotificationEvent.timestamp` from the business service.
+    /// Stored separately from `created_at` so attachment expiry checks use
+    /// the publication time rather than the consumer processing time.
+    pub event_timestamp: chrono::DateTime<chrono::Utc>,
+}
+
 /// All database operations for the `email_log` table.
 ///
 /// Keyed by `(event_id, recipient_email)` — one row per recipient per event.
@@ -34,30 +60,22 @@ impl EmailLogStore {
     /// returned inline so the caller can seed its in-memory retry counter
     /// without a second round-trip to the database.
     ///
-    /// `payload`, `from_override`, and `attachments` are stored for retry
-    /// reconstruction so the full original event can be re-published on manual retry.
-    /// `recipient_name` is stored so the display name survives retries.
+    /// `payload`, `from_override`, `attachments`, `cc`, and `bcc` are stored for
+    /// retry reconstruction so the full original event can be re-published on manual
+    /// retry. `recipient_name` is stored so the display name survives retries.
     ///
     /// **Idempotency note**: on conflict the stored `payload`, `from_override`,
-    /// `attachments`, and `sender_account` are intentionally **not** updated.
+    /// `attachments`, `cc`, `bcc`, and `sender_account` are intentionally **not** updated.
     /// The first write wins. If a re-published event carries different values
     /// for these fields (e.g. refreshed attachment URLs), the stored row keeps
     /// the original values. This is by design — the retry API reconstructs the
     /// event from the stored columns, so updating them mid-flight would change
     /// what gets re-sent. To deliver a corrected event, cancel the existing row
     /// and publish a new event with a different `event_id`.
-    #[allow(clippy::too_many_arguments)]
-    #[instrument(skip(self, payload, from_override, attachments))]
+    #[instrument(skip(self, args))]
     pub async fn insert_pending(
         &self,
-        event_id: Uuid,
-        event_type: &str,
-        recipient_email: &str,
-        recipient_name: Option<&str>,
-        payload: &serde_json::Value,
-        from_override: Option<&serde_json::Value>,
-        attachments: Option<&serde_json::Value>,
-        sender_account: Option<&str>,
+        args: InsertPendingArgs<'_>,
     ) -> Result<InsertResult, AppError> {
         // Use DO UPDATE to return the existing retry_count and status on conflict
         // so the caller can make terminal-state decisions (SENT/BLOCKED skip) in
@@ -70,21 +88,25 @@ impl EmailLogStore {
         let row = sqlx::query!(
             r#"
             INSERT INTO email_log
-                (event_id, event_type, recipient_email, recipient_name, status, payload, from_override, attachments, sender_account)
-            VALUES ($1, $2, $3, $4, 'PENDING', $5, $6, $7, $8)
+                (event_id, event_type, recipient_email, recipient_name, status, payload, from_override, attachments, sender_account, cc, bcc, send_mode, event_timestamp)
+            VALUES ($1, $2, $3, $4, 'PENDING', $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (event_id, recipient_email) DO UPDATE
                 SET updated_at = email_log.updated_at  -- no-op; fires RETURNING on conflict
             RETURNING id, retry_count, status,
                       (xmax <> 0) AS "was_conflict!: bool"
             "#,
-            event_id,
-            event_type,
-            recipient_email,
-            recipient_name,
-            payload,
-            from_override,
-            attachments,
-            sender_account,
+            args.event_id,
+            args.event_type,
+            args.recipient_email,
+            args.recipient_name,
+            args.payload,
+            args.from_override,
+            args.attachments,
+            args.sender_account,
+            args.cc,
+            args.bcc,
+            args.send_mode,
+            args.event_timestamp,
         )
         .fetch_one(&self.pool)
         .await?;
@@ -151,7 +173,8 @@ impl EmailLogStore {
     pub async fn get_by_event_id(&self, event_id: Uuid) -> Result<Vec<EmailLog>, AppError> {
         let rows = sqlx::query!(
             r#"SELECT id, event_id, event_type, recipient_email, recipient_name, status, retry_count,
-                      total_attempts, last_error, payload, from_override, attachments, sender_account, created_at, updated_at
+                      total_attempts, last_error, payload, from_override, attachments, sender_account, cc, bcc,
+                      send_mode, event_timestamp, created_at, updated_at
                FROM email_log WHERE event_id=$1 ORDER BY created_at"#,
             event_id,
         )
@@ -178,6 +201,10 @@ impl EmailLogStore {
                     from_override: r.from_override,
                     attachments: r.attachments,
                     sender_account: r.sender_account,
+                    cc: r.cc,
+                    bcc: r.bcc,
+                    send_mode: r.send_mode,
+                    event_timestamp: r.event_timestamp,
                     created_at: r.created_at,
                     updated_at: r.updated_at,
                 })
@@ -194,7 +221,8 @@ impl EmailLogStore {
     ) -> Result<EmailLog, AppError> {
         let r = sqlx::query!(
             r#"SELECT id, event_id, event_type, recipient_email, recipient_name, status, retry_count,
-                      total_attempts, last_error, payload, from_override, attachments, sender_account, created_at, updated_at
+                      total_attempts, last_error, payload, from_override, attachments, sender_account, cc, bcc,
+                      send_mode, event_timestamp, created_at, updated_at
                FROM email_log WHERE event_id=$1 AND recipient_email=$2"#,
             event_id,
             recipient_email,
@@ -217,6 +245,10 @@ impl EmailLogStore {
             from_override: r.from_override,
             attachments: r.attachments,
             sender_account: r.sender_account,
+            cc: r.cc,
+            bcc: r.bcc,
+            send_mode: r.send_mode,
+            event_timestamp: r.event_timestamp,
             created_at: r.created_at,
             updated_at: r.updated_at,
         })

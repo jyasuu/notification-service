@@ -1,6 +1,9 @@
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
-use common::{AttachmentRef, EmailEvent, FromOverride, Recipient};
+use common::{
+    AttachmentRef, ChannelOverrides, EmailOptions, FromOverride, Metadata, NotificationEvent,
+    Recipient,
+};
 use dialoguer::Confirm;
 use lapin::{
     options::{BasicPublishOptions, ExchangeDeclareOptions},
@@ -43,6 +46,35 @@ pub async fn run(args: SendArgs, cfg: CliConfig) -> Result<()> {
             bail!("Invalid email address: {}", r.email);
         }
     }
+
+    // ── 3b. Build and validate CC / BCC ────────────────────────────────
+    let cc: Vec<Recipient> = args
+        .cc
+        .iter()
+        .map(|email| {
+            if !common::is_valid_email(email) {
+                bail!("Invalid --cc address: {email}");
+            }
+            Ok(Recipient {
+                email: email.clone(),
+                name: None,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let bcc: Vec<Recipient> = args
+        .bcc
+        .iter()
+        .map(|email| {
+            if !common::is_valid_email(email) {
+                bail!("Invalid --bcc address: {email}");
+            }
+            Ok(Recipient {
+                email: email.clone(),
+                name: None,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     // ── 4. Parse attachments ──────────────────────────────────────────────────
     let attachments: Vec<AttachmentRef> = args
@@ -92,28 +124,47 @@ pub async fn run(args: SendArgs, cfg: CliConfig) -> Result<()> {
     };
 
     let event_id = args.event_id.unwrap_or_else(Uuid::new_v4);
-    let event = EmailEvent {
+    let event = NotificationEvent {
         event_id,
         timestamp: Utc::now(),
         event_type: event_type.clone(),
-        recipients: recipients.clone(),
         payload,
-        from_override,
-        metadata: common::event::Metadata {
+        metadata: Metadata {
             source: Some(args.source.clone()),
         },
-        attachments,
-        sender_account: None,
+        channel_overrides: ChannelOverrides {
+            email: Some(EmailOptions {
+                recipients: recipients.clone(),
+                cc,
+                bcc,
+                from_override,
+                attachments,
+                sender_account: None,
+                send_mode: common::SendMode::Individual,
+            }),
+        },
     };
 
     // ── 7. Confirm ────────────────────────────────────────────────────────────
+    // Convenience reference for the preview block below.
+    let email_opts = event.channel_overrides.email.as_ref().unwrap();
     if !args.yes {
         let to_str: Vec<&str> = recipients.iter().map(|r| r.email.as_str()).collect();
         println!("About to publish:");
         println!("  Event type   : {event_type}");
         println!("  Event ID     : {event_id}");
         println!("  Recipients   : {}", to_str.join(", "));
-        println!("  Attachments  : {}", event.attachments.len());
+        if !email_opts.cc.is_empty() {
+            let cc_str: Vec<&str> = email_opts.cc.iter().map(|r| r.email.as_str()).collect();
+            println!("  CC           : {}", cc_str.join(", "));
+        }
+        if !email_opts.bcc.is_empty() {
+            println!(
+                "  BCC          : {} address(es) [hidden]",
+                email_opts.bcc.len()
+            );
+        }
+        println!("  Attachments  : {}", email_opts.attachments.len());
         if args.subject.is_some() {
             println!("  Body mode    : generic HTML (GENERIC_HTML template)");
             println!("  Subject      : {}", args.subject.as_deref().unwrap_or(""));

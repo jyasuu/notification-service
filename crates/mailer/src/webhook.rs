@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use common::AppError;
@@ -13,18 +15,40 @@ pub struct WebhookConfig {
 }
 
 pub struct WebhookSender {
-    client: Client,
+    /// Shared HTTP client — callers inject this so the sender participates in
+    /// the same connection pool used for attachment fetching rather than
+    /// maintaining its own isolated pool.
+    client: Arc<Client>,
     url: String,
     auth_token: Option<String>,
 }
 
 impl WebhookSender {
-    pub fn new(cfg: WebhookConfig) -> Self {
+    /// Construct a `WebhookSender` with a caller-supplied HTTP client.
+    ///
+    /// Accepting `Arc<Client>` lets the process share a single connection pool
+    /// across attachment fetching and webhook delivery, which avoids opening a
+    /// second set of OS-level TCP connections to the same host.
+    pub fn new(cfg: WebhookConfig, client: Arc<Client>) -> Self {
         Self {
-            client: Client::new(),
+            client,
             url: cfg.url,
             auth_token: cfg.auth_token,
         }
+    }
+
+    /// Convenience constructor that builds a default `reqwest::Client`.
+    ///
+    /// Use this when the caller doesn't have a shared client to inject (e.g.
+    /// in `main.rs`, which doesn't take `reqwest` as a direct dependency).
+    /// Prefer [`WebhookSender::new`] when a shared client pool already exists.
+    pub fn with_default_client(cfg: WebhookConfig) -> Result<Self, reqwest::Error> {
+        let client = Arc::new(
+            Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()?,
+        );
+        Ok(Self::new(cfg, client))
     }
 }
 
@@ -50,16 +74,37 @@ impl EmailSender for WebhookSender {
             })
             .collect();
 
+        let cc: Vec<_> = msg
+            .cc
+            .iter()
+            .map(|r| json!({ "email": r.email, "name": r.name }))
+            .collect();
+
+        let bcc: Vec<_> = msg
+            .bcc
+            .iter()
+            .map(|r| json!({ "email": r.email, "name": r.name }))
+            .collect();
+
+        let to_extra: Vec<_> = msg
+            .to_extra
+            .iter()
+            .map(|r| json!({ "email": r.email, "name": r.name }))
+            .collect();
+
         let body = json!({
             "event_id":            msg.event_id,
             "to_email":            msg.to_email,
             "to_name":             msg.to_name,
+            "to_extra":            to_extra,
             "subject":             msg.subject,
             "body_html":           msg.body_html,
             "body_text":           msg.body_text,
             "from_email_override": msg.from_email_override,
             "from_name_override":  msg.from_name_override,
             "attachments":         attachments,
+            "cc":                  cc,
+            "bcc":                 bcc,
         });
 
         let mut req = self.client.post(&self.url).json(&body);
@@ -70,11 +115,11 @@ impl EmailSender for WebhookSender {
         let resp = req
             .send()
             .await
-            .map_err(|e| AppError::Mailer(e.to_string()))?;
+            .map_err(|e| AppError::transient_mailer(e.to_string()))?;
 
         let status = resp.status();
         if status.is_success() {
-            info!(event_id = %msg.event_id, attachments = msg.attachments.len(), "Email dispatched via webhook");
+            info!(event_id = %msg.event_id, attachments = msg.attachments.len(), cc = msg.cc.len(), bcc = msg.bcc.len(), "Email dispatched via webhook");
             return Ok(());
         }
 
@@ -84,10 +129,12 @@ impl EmailSender for WebhookSender {
             return Err(AppError::RateLimited(format!("webhook HTTP 429: {text}")));
         }
         if status.is_client_error() {
-            return Err(AppError::Mailer(format!(
-                "permanent: webhook HTTP {status}: {text}"
+            return Err(AppError::permanent_mailer(format!(
+                "webhook HTTP {status}: {text}"
             )));
         }
-        Err(AppError::Mailer(format!("webhook HTTP {status}: {text}")))
+        Err(AppError::transient_mailer(format!(
+            "webhook HTTP {status}: {text}"
+        )))
     }
 }

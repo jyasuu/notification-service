@@ -26,4 +26,4 @@ futures-lite = "2"
 tokio-util   = { version = "0.7" }
 metrics      = { workspace = true }
 
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { workspace = true }

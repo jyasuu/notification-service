@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use api::{build_router, ApiState, Publisher};
-use consumer::{run_consumer, ConsumerConfig};
+use consumer::{run_consumer, ConsumerConfig, ProcessorContext};
 use mailer::smtp::SmtpConfig;
 use mailer::webhook::WebhookConfig;
 use mailer::{EmailSender, SenderRegistry, SmtpSender, WebhookSender};
@@ -13,6 +13,7 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 
 use rate_limiter::MailRateLimiter;
 use recipient_filter::RecipientFilter;
+use reqwest::Client;
 use sqlx::postgres::PgPoolOptions;
 use store::{EmailLogStore, TemplateStore};
 use tokio_util::sync::CancellationToken;
@@ -82,6 +83,18 @@ async fn main() -> anyhow::Result<()> {
     );
     info!(ttl_secs = cfg.template_cache_ttl_secs, "Database ready");
 
+    // ── Shared HTTP client ────────────────────────────────────────────────────
+    // One reqwest::Client is shared across webhook delivery and attachment
+    // fetching so both use the same connection pool. This avoids opening a
+    // second set of OS-level TCP connections to the same hosts and keeps
+    // keep-alive connections reusable across both code paths.
+    let http = Arc::new(
+        Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .context("Failed to build shared HTTP client")?,
+    );
+
     // ── Email sender ──────────────────────────────────────────────────────────
     let sender: Arc<dyn EmailSender> = match &cfg.mailer {
         MailerConfig::Smtp {
@@ -117,10 +130,13 @@ async fn main() -> anyhow::Result<()> {
         }
         MailerConfig::Webhook { url, auth_token } => {
             info!(url, "Using webhook backend");
-            Arc::new(WebhookSender::new(WebhookConfig {
-                url: url.clone(),
-                auth_token: auth_token.clone(),
-            }))
+            Arc::new(WebhookSender::new(
+                WebhookConfig {
+                    url: url.clone(),
+                    auth_token: auth_token.clone(),
+                },
+                Arc::clone(&http),
+            ))
         }
     };
 
@@ -234,19 +250,17 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let consumer_shutdown = shutdown.clone();
+    let consumer_http = Arc::clone(&http);
     let consumer_task = tokio::spawn(async move {
-        if let Err(e) = run_consumer(
-            consumer_cfg,
+        let ctx = ProcessorContext {
             store,
             template_store,
             sender,
             sender_registry,
             filter,
             rate_limiter,
-            consumer_shutdown,
-        )
-        .await
-        {
+        };
+        if let Err(e) = run_consumer(consumer_cfg, ctx, consumer_http, consumer_shutdown).await {
             tracing::error!(error = %e, "Consumer exited with error");
         }
     });

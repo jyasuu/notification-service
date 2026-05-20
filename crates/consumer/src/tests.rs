@@ -21,7 +21,7 @@ mod processor_tests {
 
     use async_trait::async_trait;
     use chrono::Utc;
-    use common::{AppError, EmailEvent, Recipient};
+    use common::{AppError, ChannelOverrides, EmailOptions, NotificationEvent, Recipient};
     use mailer::{EmailMessage, EmailSender};
     use rate_limiter::{MailRateLimiter, RateLimitConfig};
     use recipient_filter::{FilterConfig, RecipientFilter};
@@ -73,31 +73,38 @@ mod processor_tests {
     }
 
     fn transient() -> Result<(), AppError> {
-        Err(AppError::Mailer("transient network error".into()))
+        Err(AppError::transient_mailer("transient network error"))
     }
 
     fn permanent() -> Result<(), AppError> {
-        Err(AppError::Mailer("permanent: bad address".into()))
+        Err(AppError::permanent_mailer("bad address"))
     }
 
     fn rate_limited() -> Result<(), AppError> {
         Err(AppError::RateLimited("429 from mail server".into()))
     }
 
-    fn make_event(recipient_email: &str) -> EmailEvent {
-        EmailEvent {
+    fn make_event(recipient_email: &str) -> NotificationEvent {
+        NotificationEvent {
             event_id: Uuid::new_v4(),
             timestamp: Utc::now(),
             event_type: "ORDER_CONFIRMATION".into(),
-            recipients: vec![Recipient {
-                email: recipient_email.into(),
-                name: Some("Test User".into()),
-            }],
             payload: json!({ "orderId": "42", "amount": "9.99", "name": "Test User" }),
-            from_override: None,
             metadata: Default::default(),
-            attachments: vec![],
-            sender_account: None,
+            channel_overrides: ChannelOverrides {
+                email: Some(EmailOptions {
+                    recipients: vec![Recipient {
+                        email: recipient_email.into(),
+                        name: Some("Test User".into()),
+                    }],
+                    cc: vec![],
+                    bcc: vec![],
+                    from_override: None,
+                    attachments: vec![],
+                    sender_account: None,
+                    send_mode: common::SendMode::Individual,
+                }),
+            },
         }
     }
 
@@ -116,13 +123,13 @@ mod processor_tests {
 
     #[test]
     fn permanent_mailer_error_is_not_retryable() {
-        let err = AppError::Mailer("permanent: bad address".into());
+        let err = AppError::permanent_mailer("bad address");
         assert!(!is_retryable(&err));
     }
 
     #[test]
     fn transient_mailer_error_is_retryable() {
-        let err = AppError::Mailer("connection reset".into());
+        let err = AppError::transient_mailer("connection reset");
         assert!(is_retryable(&err));
     }
 
@@ -186,7 +193,7 @@ mod processor_tests {
 
         for _ in 0..10 {
             // Transient error every time
-            let err = AppError::Mailer("transient".into());
+            let err = AppError::transient_mailer("transient");
             if !is_retryable(&err) {
                 failed_permanently = true;
                 break;
@@ -208,7 +215,7 @@ mod processor_tests {
         let mut attempt: u32 = 0;
         let mut stopped_early = false;
 
-        let err = AppError::Mailer("permanent: bad domain".into());
+        let err = AppError::permanent_mailer("bad domain");
         if !is_retryable(&err) {
             stopped_early = true;
         } else if attempt >= max_retries {

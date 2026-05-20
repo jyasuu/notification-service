@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Request, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -17,6 +17,14 @@ use crate::{
     },
     state::ApiState,
 };
+
+/// Hard cap on incoming request bodies (64 KiB).
+///
+/// All current API endpoints either have no body (GET / DELETE) or accept a
+/// body-less POST (retry endpoints reconstruct the event from DB, so no body
+/// is sent at all). 64 KiB is generous enough to tolerate any future body
+/// that might be added while preventing memory exhaustion from oversized uploads.
+const MAX_BODY_BYTES: usize = 64 * 1024;
 
 pub fn build_router(state: ApiState) -> Router {
     // Probe routes are always open — no auth needed for health checks.
@@ -50,6 +58,7 @@ pub fn build_router(state: ApiState) -> Router {
     Router::new()
         .merge(probes)
         .merge(protected)
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
