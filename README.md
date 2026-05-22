@@ -143,7 +143,7 @@ must re-publish the event with fresh URLs before retrying.
 ## Per-recipient FAILED recovery
 
 When a recipient exhausts all in-process retries it is marked `FAILED` in
-`email_log` and the AMQP message is ACK'd (other recipients in the same event
+`notification_log` and the AMQP message is ACK'd (other recipients in the same event
 are unaffected). There is no automatic re-queue; recovery requires a manual
 operator action via the HTTP API:
 
@@ -169,13 +169,13 @@ endpoint when `summary.failed > 0`, or set up an alert on the
 
 ## Adding a new template
 
-Templates are stored in the `email_template` database table. To add a new
-event type, insert a row — no code change or service restart required:
+Templates are stored in the `notification_template` database table (with a `channel` column — use `'email'` for email templates). To add a new event type, insert a row — no code change or service restart required:
 
 ```sql
-INSERT INTO email_template (type, subject, body_html, body_text)
+INSERT INTO notification_template (type, channel, subject, body_html, body_text)
 VALUES (
     'INVOICE_READY',
+    'email',
     'Your invoice #{{ invoiceId }} is ready',
     '<h1>Hi {{ name }},</h1><p>Invoice <strong>#{{ invoiceId }}</strong> for ${{ amount }} is ready.</p>',
     'Hi {{ name }}, invoice #{{ invoiceId }} for ${{ amount }} is ready.'

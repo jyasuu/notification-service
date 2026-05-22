@@ -420,9 +420,7 @@ async fn process_one_recipient(
             // treated as immediately exhausted.  Mark FAILED now rather than
             // waiting for back-off cycles.  The row remains visible in status
             // queries and can be replayed via the operator retry API.
-            RecipientOutcome::Failed(ref e)
-                if email_opts.retry_policy == RetryPolicy::NoRetry =>
-            {
+            RecipientOutcome::Failed(ref e) if email_opts.retry_policy == RetryPolicy::NoRetry => {
                 error!(
                     event_id = %event.event_id,
                     email    = %recipient.email,
@@ -489,6 +487,23 @@ async fn process_one_recipient(
                 }
             }
 
+            // GroupFailedWithIndividualRows is only emitted by the group-send
+            // path in processor.  It should never appear here in the
+            // individual-send loop; treat it as an unexpected error and stop.
+            RecipientOutcome::GroupFailedWithIndividualRows(ref e) => {
+                error!(
+                    event_id = %event.event_id,
+                    email    = %recipient.email,
+                    error    = %e,
+                    "Unexpected GroupFailedWithIndividualRows in individual-send loop — marking FAILED"
+                );
+                let _ = ctx
+                    .store
+                    .mark_failed(event.event_id, &recipient.email, &e.to_string(), true)
+                    .await;
+                return;
+            }
+
             // Transient failure — normal exponential backoff
             RecipientOutcome::Failed(ref e) => {
                 attempt += 1;
@@ -498,7 +513,16 @@ async fn process_one_recipient(
                 // the maximum single delay is ~17 min.  `attempt` may legitimately
                 // exceed 10 when seeded from a high DB retry_count after a restart,
                 // but the delay stays capped at this ceiling regardless.
-                let delay = Duration::from_millis(cfg.retry_base_ms * (1 << attempt.min(10)));
+                //
+                // We additionally clamp the computed delay to 30 minutes so that
+                // a large retry_base_ms (e.g. 5 000 ms × 2^10 ≈ 85 min) does not
+                // strand the un-ACK'd AMQP message beyond any reasonable consumer
+                // timeout.  Operators who need longer hold times should instead
+                // increase max_retries and keep retry_base_ms ≤ 2 000.
+                const MAX_RETRY_DELAY_MS: u64 = 30 * 60 * 1000; // 30 minutes
+                let delay = Duration::from_millis(
+                    (cfg.retry_base_ms * (1 << attempt.min(10))).min(MAX_RETRY_DELAY_MS)
+                );
                 warn!(
                     event_id = %event.event_id,
                     email    = %recipient.email,
@@ -646,9 +670,7 @@ async fn process_one_group(
             }
 
             // NoRetry policy — fail immediately, same as the individual path.
-            RecipientOutcome::Failed(ref e)
-                if email_opts.retry_policy == RetryPolicy::NoRetry =>
-            {
+            RecipientOutcome::Failed(ref e) if email_opts.retry_policy == RetryPolicy::NoRetry => {
                 error!(
                     event_id = %event.event_id,
                     error    = %e,
@@ -709,7 +731,7 @@ async fn process_one_group(
             }
 
             // ── Individual-row fallback ──────────────────────────────────────
-            // `process_group` already wrote an `email_log` row for *every*
+            // `process_group` already wrote a `notification_log` row for *every*
             // recipient (GroupRetryMode::Individual) before the send attempt
             // failed.  Re-sending the whole group email would duplicate
             // recipients who were already delivered to by the SMTP server
@@ -733,21 +755,15 @@ async fn process_one_group(
                 );
                 let mut join_set = tokio::task::JoinSet::new();
                 for recipient in email_opts.recipients.clone() {
-                    let ctx       = ctx.clone();
-                    let event     = event.clone();
-                    let opts      = email_opts.clone();
-                    let atts      = attachments.to_vec();
-                    let cfg       = cfg.clone();
-                    let shutdown  = shutdown.clone();
+                    let ctx = ctx.clone();
+                    let event = event.clone();
+                    let opts = email_opts.clone();
+                    let atts = attachments.to_vec();
+                    let cfg = cfg.clone();
+                    let shutdown = shutdown.clone();
                     join_set.spawn(async move {
                         process_one_recipient(
-                            &ctx,
-                            &event,
-                            &opts,
-                            &recipient,
-                            &atts,
-                            &cfg,
-                            &shutdown,
+                            &ctx, &event, &opts, &recipient, &atts, &cfg, &shutdown,
                         )
                         .await;
                     });
@@ -767,7 +783,11 @@ async fn process_one_group(
             RecipientOutcome::Failed(ref e) => {
                 attempt += 1;
                 rl_count = 0;
-                let delay = Duration::from_millis(cfg.retry_base_ms * (1 << attempt.min(10)));
+                // Same cap as process_one_recipient — see comment there.
+                const MAX_RETRY_DELAY_MS: u64 = 30 * 60 * 1000; // 30 minutes
+                let delay = Duration::from_millis(
+                    (cfg.retry_base_ms * (1 << attempt.min(10))).min(MAX_RETRY_DELAY_MS)
+                );
                 warn!(
                     event_id = %event.event_id,
                     attempt,
@@ -856,6 +876,13 @@ async fn declare_topology(
             {
                 // Queue does not yet exist — proceed with the normal active declare.
                 // The probe channel is now closed by the broker; we discard it.
+                // NOTE: lapin::channel logs an ERROR internally when the broker
+                // closes the probe channel with 404; that is expected noise on
+                // first boot and can be silenced with RUST_LOG=lapin=warn.
+                tracing::debug!(
+                    queue = queue_name,
+                    "Queue not found on passive probe — will be created by active declare"
+                );
             }
             Err(e) => {
                 // Any other error (e.g. 406 PRECONDITION_FAILED for argument

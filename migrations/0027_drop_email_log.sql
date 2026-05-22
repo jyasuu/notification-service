@@ -1,0 +1,28 @@
+-- migrations/0027_drop_email_log.sql
+--
+-- Final cleanup: drops the legacy `email_log` table after the application
+-- has been fully cut over to notification_log + email_notification_log.
+--
+-- !! DO NOT RUN until all of the following are confirmed: !!
+--
+--   1. Migration 0026 (backfill) completed successfully.
+--   2. The application is deployed with the new store layer (Phase 2-4).
+--   3. notification_log row count matches the former email_log row count.
+--   4. The retry API has been smoke-tested end-to-end against new tables.
+--   5. Prometheus metrics (emails_sent_total etc.) are still emitting.
+--   6. `ns-cli status` / `ns-cli logs` return correct data.
+--
+-- Verification query to run before applying this migration:
+--
+--   SELECT
+--     (SELECT COUNT(*) FROM email_log)           AS old_count,
+--     (SELECT COUNT(*) FROM notification_log
+--      WHERE channel = 'email')                  AS new_count;
+--
+-- Both counts must be equal before proceeding.
+--
+-- If you prefer a safety window, rename instead of drop:
+--   ALTER TABLE email_log RENAME TO email_log_archive;
+-- then drop email_log_archive after one release cycle.
+
+DROP TABLE IF EXISTS email_log;

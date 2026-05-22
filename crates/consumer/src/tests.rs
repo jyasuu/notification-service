@@ -3,7 +3,7 @@
 /// These tests exercise `process_recipient` and `process_one_recipient`
 /// (via the `ProcessorContext`) using:
 ///   - A `MockSender` that returns a configurable sequence of outcomes.
-///   - Stub `EmailLogStore` / `TemplateStore` backed by a real Postgres
+///   - Stub `EmailNotificationStore` / `TemplateStore` backed by a real Postgres
 ///     instance only in CI; locally the tests that need DB are gated behind
 ///     `#[cfg(feature = "integration")]`.  The pure-logic tests (retry
 ///     counting, permanent-vs-transient branching, rate-limit cap) use
@@ -26,6 +26,7 @@ mod processor_tests {
     use rate_limiter::{MailRateLimiter, RateLimitConfig};
     use recipient_filter::{FilterConfig, RecipientFilter};
     use serde_json::json;
+    use tokio_retry::Retry;
     use uuid::Uuid;
 
     use crate::processor::{is_retryable, ProcessorContext};
@@ -103,6 +104,8 @@ mod processor_tests {
                     attachments: vec![],
                     sender_account: None,
                     send_mode: common::SendMode::Individual,
+                    group_retry_mode: common::GroupRetryMode::Individual,
+                    retry_policy: common::RetryPolicy::Retry,
                 }),
             },
         }
@@ -164,7 +167,7 @@ mod processor_tests {
     // which is what the runner acts on.
 
     fn make_ctx(sender: Arc<dyn EmailSender>) -> ProcessorContext {
-        // We can't build a real EmailLogStore without a DB connection, so these
+        // We can't build a real EmailNotificationStore without a DB connection, so these
         // tests focus on the path-branching that can be verified without DB I/O.
         // See the `integration` feature section below for DB-backed tests.
         //

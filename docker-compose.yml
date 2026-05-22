@@ -126,8 +126,8 @@ services:
       - "${MAILPIT_UI_PORT:-8025}:8025"
     networks:
       - backend
-    profiles:
-      - dev
+    # profiles:
+    #   - dev
 
   # ── Notification service ──────────────────────────────────────────────────
   # Waits for migrate to finish — schema is guaranteed ready on first query.

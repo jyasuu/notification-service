@@ -3723,6 +3723,7 @@ name = "store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "common",
  "serde",

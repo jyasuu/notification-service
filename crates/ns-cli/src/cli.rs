@@ -45,7 +45,7 @@ pub enum Command {
     /// Reset FAILED recipient(s) to PENDING and re-enqueue.
     Retry(RetryArgs),
 
-    /// List recent email_log rows with optional filters.
+    /// List recent notification_log rows with optional filters.
     Logs(Box<LogsArgs>),
 
     /// Inspect the business-service outbox table.

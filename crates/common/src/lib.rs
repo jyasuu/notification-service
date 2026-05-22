@@ -10,4 +10,4 @@ pub use event::{
     AttachmentRef, ChannelOverrides, EmailEvent, EmailOptions, FromOverride, GroupRetryMode,
     Metadata, NotificationEvent, Recipient, RetryPolicy, SendMode,
 };
-pub use log::{EmailLog, EmailStatus};
+pub use log::{EmailLog, EmailStatus, NotificationLog, NotificationStatus};

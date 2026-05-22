@@ -1,4 +1,4 @@
-//! `ns logs` — list recent email_log rows with optional filters.
+//! `ns logs` — list recent notification_log rows with optional filters.
 //!
 //! Queries the notification DB directly; does not require the HTTP API.
 
@@ -43,13 +43,14 @@ pub async fn run(args: LogsArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<()
     let email_filter = format!("%{}%", args.email.as_deref().unwrap_or(""));
 
     let rows = sqlx::query!(
-        r#"SELECT event_id, event_type, recipient_email, status,
-                  retry_count, last_error, updated_at
-           FROM   email_log
-           WHERE  status           ILIKE $1
-             AND  event_type       ILIKE $2
-             AND  recipient_email  ILIKE $3
-           ORDER  BY updated_at DESC
+        r#"SELECT n.event_id, n.event_type, n.recipient_id AS recipient_email,
+                  n.status, n.retry_count, n.last_error, n.updated_at
+           FROM   notification_log n
+           WHERE  n.channel        = 'email'
+             AND  n.status         ILIKE $1
+             AND  n.event_type     ILIKE $2
+             AND  n.recipient_id   ILIKE $3
+           ORDER  BY n.updated_at DESC
            LIMIT  $4"#,
         status_filter,
         type_filter,

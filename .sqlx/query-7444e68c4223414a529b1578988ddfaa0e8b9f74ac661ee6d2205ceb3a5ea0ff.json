@@ -1,0 +1,45 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO notification_log\n                (event_id, event_type, channel, recipient_id, payload, event_timestamp)\n            VALUES ($1, $2, $3, $4, $5, $6)\n            ON CONFLICT (event_id, channel, recipient_id) DO UPDATE\n                SET updated_at = notification_log.updated_at\n            RETURNING id,\n                      retry_count,\n                      status,\n                      (xmax <> 0) AS \"was_conflict!: bool\"\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "retry_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "was_conflict!: bool",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "7444e68c4223414a529b1578988ddfaa0e8b9f74ac661ee6d2205ceb3a5ea0ff"
+}

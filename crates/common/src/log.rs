@@ -4,51 +4,56 @@ use uuid::Uuid;
 
 use crate::AppError;
 
+/// Delivery status shared across all notification channels.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum EmailStatus {
+pub enum NotificationStatus {
     Pending,
     Sent,
     Failed,
     Blocked,
 }
 
-impl EmailStatus {
+impl NotificationStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
-            EmailStatus::Pending => "PENDING",
-            EmailStatus::Sent => "SENT",
-            EmailStatus::Failed => "FAILED",
-            EmailStatus::Blocked => "BLOCKED",
+            NotificationStatus::Pending => "PENDING",
+            NotificationStatus::Sent => "SENT",
+            NotificationStatus::Failed => "FAILED",
+            NotificationStatus::Blocked => "BLOCKED",
         }
     }
 }
 
-impl TryFrom<&str> for EmailStatus {
+impl TryFrom<&str> for NotificationStatus {
     type Error = AppError;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         match s {
-            "PENDING" => Ok(EmailStatus::Pending),
-            "SENT" => Ok(EmailStatus::Sent),
-            "FAILED" => Ok(EmailStatus::Failed),
-            "BLOCKED" => Ok(EmailStatus::Blocked),
+            "PENDING" => Ok(NotificationStatus::Pending),
+            "SENT" => Ok(NotificationStatus::Sent),
+            "FAILED" => Ok(NotificationStatus::Failed),
+            "BLOCKED" => Ok(NotificationStatus::Blocked),
             other => Err(AppError::UnknownStatus(other.to_owned())),
         }
     }
 }
 
-impl std::fmt::Display for EmailStatus {
+impl std::fmt::Display for NotificationStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-/// Maps 1-to-1 with the `email_log` PostgreSQL table.
+// Back-compat alias — callers that still use `EmailStatus` continue to compile.
+pub use NotificationStatus as EmailStatus;
+
+/// Channel-agnostic delivery log row.
 ///
+/// Maps 1-to-1 with `notification_log` + `email_notification_log`.
 /// Keyed by `(event_id, recipient_email)` — one row per recipient per event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EmailLog {
+pub struct NotificationLog {
     pub id: Uuid,
     pub event_id: Uuid,
     /// The specific recipient this row tracks.
@@ -60,7 +65,7 @@ pub struct EmailLog {
     /// Nullable for rows written before migration 0011.
     pub recipient_name: Option<String>,
     pub event_type: String,
-    pub status: EmailStatus,
+    pub status: NotificationStatus,
     /// How many automatic retry attempts have been made in the current attempt
     /// window.  Reset to 0 when an operator manually retries via the HTTP API
     /// so the recipient gets a fresh set of automatic retries.
@@ -114,3 +119,6 @@ pub struct EmailLog {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+// Back-compat alias — callers that still use `EmailLog` continue to compile.
+pub use NotificationLog as EmailLog;

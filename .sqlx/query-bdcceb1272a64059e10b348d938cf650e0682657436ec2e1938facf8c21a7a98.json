@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE notification_log\n               SET retry_count    = retry_count + 1,\n                   total_attempts = total_attempts + 1,\n                   last_error     = $4,\n                   status         = $5,\n                   updated_at     = now()\n             WHERE event_id     = $1\n               AND channel      = $2\n               AND recipient_id = $3\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bdcceb1272a64059e10b348d938cf650e0682657436ec2e1938facf8c21a7a98"
+}

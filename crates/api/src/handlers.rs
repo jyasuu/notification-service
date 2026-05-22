@@ -7,7 +7,7 @@ use axum::{
 use chrono::Utc;
 use common::{
     is_valid_email, AppError, AttachmentRef, ChannelOverrides, EmailOptions, EmailStatus,
-    FromOverride, Metadata, NotificationEvent, Recipient,
+    FromOverride, GroupRetryMode, Metadata, NotificationEvent, Recipient, RetryPolicy,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -16,11 +16,12 @@ use crate::{errors::ApiError, state::ApiState};
 
 /// Re-publish an event to the queue so the consumer re-processes it.
 ///
-/// Reconstructs the event from `email_log` rows, including the stored `payload`,
-/// `from_override`, `attachments`, `cc`, `bcc`, `send_mode`, and `event_timestamp`
-/// columns so the full original event is faithfully replayed — not a stripped-down
-/// envelope that loses the From address override, file attachments, CC/BCC
-/// recipients, the delivery mode, or the original publication timestamp.
+/// Reconstructs the event from `notification_log` + `email_notification_log` rows,
+/// including the stored `payload`, `from_override`, `attachments`, `cc`, `bcc`,
+/// `send_mode`, and `event_timestamp` columns so the full original event is
+/// faithfully replayed — not a stripped-down envelope that loses the From address
+/// override, file attachments, CC/BCC recipients, the delivery mode, or the
+/// original publication timestamp.
 ///
 /// `only_emails` — when `Some`, only those email addresses are included in the
 /// published recipients list. Used by single-recipient retry to avoid
@@ -64,7 +65,8 @@ async fn republish_event(
                 "Data integrity violation: rows for the same event_id have different event_types"
             );
             return Err(ApiError(AppError::Queue(format!(
-                "event {event_id} has inconsistent event_types in email_log —                  this indicates data corruption; inspect the rows before retrying"
+                "event {event_id} has inconsistent event_types in notification_log — \
+                 this indicates data corruption; inspect the rows before retrying"
             ))));
         }
         first
@@ -87,7 +89,7 @@ async fn republish_event(
             if !is_valid_email(email) {
                 return Err(ApiError(AppError::permanent_mailer(format!(
                     "stored from_override email address '{email}' is invalid — \
-                     fix the email_log row before retrying"
+                     fix the notification_log row before retrying"
                 ))));
             }
         }
@@ -244,6 +246,8 @@ async fn republish_event(
                 attachments,
                 sender_account,
                 send_mode,
+                group_retry_mode: GroupRetryMode::default(),
+                retry_policy: RetryPolicy::default(),
             }),
         },
     };
@@ -369,7 +373,7 @@ pub async fn get_recipient_status(
 ///
 /// Evicts one entry from the in-memory template cache, forcing the next
 /// delivery attempt for that event type to re-fetch from the database.
-/// Use this after editing a row in the `email_template` table so the change
+/// Use this after editing a row in the `notification_template` table so the change
 /// takes effect without a service restart.
 ///
 /// Returns 204 No Content on success (even when the key was not cached).

@@ -1,6 +1,6 @@
-//! `ns template` — list, show, and flush email templates.
+//! `ns template` — list, show, and flush notification templates.
 //!
-//! * `list` and `show` query the `email_template` table directly (same as
+//! * `list` and `show` query the `notification_template` table directly (same as
 //!   `ns status` / `ns logs`) — they do not require the HTTP API to be running.
 //! * `flush` calls the HTTP API's DELETE cache endpoints, which do require a
 //!   running service.
@@ -21,6 +21,8 @@ use crate::{
 struct TemplateRow {
     #[tabled(rename = "Type")]
     event_type: String,
+    #[tabled(rename = "Channel")]
+    channel: String,
     #[tabled(rename = "Subject")]
     subject: String,
     #[tabled(rename = "Version")]
@@ -33,7 +35,7 @@ struct TemplateRow {
 
 pub async fn run(args: TemplateArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<()> {
     match args.action {
-        // ── list: read email_template directly from the DB ────────────────────
+        // ── list: read notification_template directly from the DB ─────────────
         TemplateAction::List => {
             let pool = PgPoolOptions::new()
                 .max_connections(2)
@@ -42,9 +44,9 @@ pub async fn run(args: TemplateArgs, cfg: CliConfig, fmt: OutputFormat) -> Resul
                 .context("Failed to connect to database")?;
 
             let rows = sqlx::query!(
-                r#"SELECT type, subject, version, active, updated_at
-                   FROM   email_template
-                   ORDER  BY type"#
+                r#"SELECT type, channel, subject, version, active, updated_at
+                   FROM   notification_template
+                   ORDER  BY type, channel"#
             )
             .fetch_all(&pool)
             .await?;
@@ -58,6 +60,7 @@ pub async fn run(args: TemplateArgs, cfg: CliConfig, fmt: OutputFormat) -> Resul
                 .into_iter()
                 .map(|r| TemplateRow {
                     event_type: r.r#type,
+                    channel: r.channel,
                     subject: output::truncate(&r.subject, 50),
                     version: r.version,
                     active: r.active,
@@ -79,26 +82,30 @@ pub async fn run(args: TemplateArgs, cfg: CliConfig, fmt: OutputFormat) -> Resul
                 .await
                 .context("Failed to connect to database")?;
 
-            let row = sqlx::query!(
-                r#"SELECT type, subject, body_html, body_text, version, active, updated_at
-                   FROM   email_template
-                   WHERE  type = $1"#,
+            let rows = sqlx::query!(
+                r#"SELECT type, channel, subject, body_html, body_text, version, active, updated_at
+                   FROM   notification_template
+                   WHERE  type = $1
+                   ORDER  BY channel"#,
                 event_type,
             )
-            .fetch_optional(&pool)
+            .fetch_all(&pool)
             .await?;
 
-            match row {
-                None => bail!("No template found for event type '{event_type}'"),
-                Some(r) => {
-                    println!("Type    : {}", r.r#type);
-                    println!("Version : {}  Active: {}", r.version, r.active);
-                    println!("Updated : {}", r.updated_at.format("%Y-%m-%d %H:%M:%S UTC"));
-                    println!();
-                    println!("Subject :\n{}\n", r.subject);
-                    println!("HTML body:\n{}\n", r.body_html);
-                    println!("Text body:\n{}", r.body_text);
-                }
+            if rows.is_empty() {
+                bail!("No template found for event type '{event_type}'");
+            }
+
+            for r in rows {
+                println!("Type    : {}", r.r#type);
+                println!("Channel : {}", r.channel);
+                println!("Version : {}  Active: {}", r.version, r.active);
+                println!("Updated : {}", r.updated_at.format("%Y-%m-%d %H:%M:%S UTC"));
+                println!();
+                println!("Subject :\n{}\n", r.subject);
+                println!("HTML body:\n{}\n", r.body_html);
+                println!("Text body:\n{}", r.body_text);
+                println!("{}", "─".repeat(60));
             }
         }
 

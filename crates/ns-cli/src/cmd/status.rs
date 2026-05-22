@@ -1,6 +1,6 @@
 //! `ns status` — show delivery status for an event from the notification DB.
 //!
-//! Queries email_log directly; does not require the HTTP API to be running.
+//! Queries notification_log directly; does not require the HTTP API to be running.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -37,9 +37,12 @@ pub async fn run(args: StatusArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<
     if let Some(email) = &args.email {
         // Single recipient
         let row = sqlx::query!(
-            r#"SELECT recipient_email, status, retry_count, last_error, updated_at
-               FROM email_log
-               WHERE event_id = $1 AND recipient_email = $2"#,
+            r#"SELECT n.recipient_id AS recipient_email, n.status,
+                      n.retry_count, n.last_error, n.updated_at
+               FROM notification_log n
+               WHERE n.event_id    = $1
+                 AND n.channel     = 'email'
+                 AND n.recipient_id = $2"#,
             args.event_id,
             email,
         )
@@ -63,12 +66,14 @@ pub async fn run(args: StatusArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<
             }
         }
     } else {
-        // All recipients
+        // All recipients for the event
         let rows = sqlx::query!(
-            r#"SELECT recipient_email, status, retry_count, last_error, updated_at
-               FROM email_log
-               WHERE event_id = $1
-               ORDER BY created_at"#,
+            r#"SELECT n.recipient_id AS recipient_email, n.status,
+                      n.retry_count, n.last_error, n.updated_at
+               FROM notification_log n
+               WHERE n.event_id = $1
+                 AND n.channel  = 'email'
+               ORDER BY n.created_at"#,
             args.event_id,
         )
         .fetch_all(&pool)

@@ -1,6 +1,6 @@
 //! Template rendering via [minijinja].
 //!
-//! Templates are Jinja2-compatible strings stored in the `email_template`
+//! Templates are Jinja2-compatible strings stored in the `notification_template`
 //! table.  The engine is configured once per render call (stateless — no
 //! shared `Environment` singleton needed at these call volumes).
 //!
@@ -149,7 +149,7 @@ fn template_err(phase: &str, err: minijinja::Error) -> AppError {
 // ── Built-in template strings (used in tests only) ────────────────────────────
 //
 // The canonical, authoritative versions of these templates live in the
-// `email_template` database table, seeded and kept up-to-date by migrations
+// `notification_template` database table, seeded and kept up-to-date by migrations
 // 0010, 0017, and 0018.  The constants below are used exclusively by unit
 // tests that exercise the rendering functions without a database.
 //
@@ -158,7 +158,7 @@ fn template_err(phase: &str, err: minijinja::Error) -> AppError {
 // which queries the DB with a TTL cache and returns `AppError::Template` for
 // unknown event types so the consumer can immediately route to DLQ.
 //
-// To add a new event type: INSERT a row into `email_template`.  No code change
+// To add a new event type: INSERT a row into `notification_template`.  No code change
 // or redeploy is required; the cache picks it up within `template_cache_ttl_secs`.
 
 #[cfg(test)]
@@ -353,7 +353,7 @@ mod tests {
     // ── Built-in template string rendering ───────────────────────────────────
     //
     // These tests verify the rendering functions against the same template
-    // strings that are seeded into the `email_template` table by migrations.
+    // strings that are seeded into the `notification_template` table by migrations.
     // They do not test DB access — that is covered by integration tests in
     // crates/store.
 

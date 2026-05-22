@@ -12,13 +12,16 @@ use tracing::{info, warn};
 /// Thin wrapper around an AMQP channel used by the HTTP API to re-enqueue
 /// events whose DB rows have been reset to PENDING via the retry endpoints.
 ///
-/// The inner channel is held behind an `Arc<Mutex<…>>` so that a dropped
-/// connection can be transparently re-established on the next publish call
-/// without restarting the process. Callers that receive an error may simply
-/// retry the HTTP request — the next call will reconnect automatically.
+/// The inner `(Connection, Channel)` pair is held behind an `Arc<Mutex<…>>` so
+/// that a dropped connection can be transparently re-established on the next
+/// publish call without restarting the process.  Keeping the `Connection` alive
+/// alongside the `Channel` prevents it from being dropped at the end of
+/// `open_channel`, which would immediately invalidate the channel in lapin.
+/// Callers that receive an error may simply retry the HTTP request — the next
+/// call will reconnect automatically.
 #[derive(Clone)]
 pub struct Publisher {
-    inner: Arc<Mutex<Option<Channel>>>,
+    inner: Arc<Mutex<Option<(Connection, Channel)>>>,
     amqp_url: String,
     exchange: String,
     routing_key: String,
@@ -30,9 +33,9 @@ impl Publisher {
         exchange: &str,
         routing_key: &str,
     ) -> anyhow::Result<Self> {
-        let channel = open_channel(amqp_url, exchange).await?;
+        let pair = open_channel(amqp_url, exchange).await?;
         Ok(Self {
-            inner: Arc::new(Mutex::new(Some(channel))),
+            inner: Arc::new(Mutex::new(Some(pair))),
             amqp_url: amqp_url.to_owned(),
             exchange: exchange.to_owned(),
             routing_key: routing_key.to_owned(),
@@ -50,15 +53,16 @@ impl Publisher {
         // Try once with the current channel; on failure, reconnect and retry once.
         for attempt in 0..2u8 {
             let channel = match guard.as_ref() {
-                Some(ch) if ch.status().connected() => ch,
+                Some((_, ch)) if ch.status().connected() => ch,
                 _ => {
                     // Channel is gone — reconnect.
                     warn!("Publisher: channel not connected — reconnecting");
                     match open_channel(&self.amqp_url, &self.exchange).await {
-                        Ok(ch) => {
+                        Ok(pair) => {
                             info!("Publisher: reconnected to RabbitMQ");
-                            *guard = Some(ch);
-                            guard.as_ref().unwrap()
+                            *guard = Some(pair);
+                            // SAFETY: we just assigned Some above.
+                            &guard.as_ref().unwrap().1
                         }
                         Err(e) => {
                             return Err(AppError::Queue(format!(
@@ -89,7 +93,7 @@ impl Publisher {
                         .map_err(|e| AppError::Queue(e.to_string()));
                 }
                 Err(e) if attempt == 0 => {
-                    // First attempt failed — clear channel and let loop reconnect.
+                    // First attempt failed — clear the pair and let loop reconnect.
                     warn!(error = %e, "Publisher: publish failed, will reconnect");
                     *guard = None;
                 }
@@ -110,7 +114,7 @@ impl Publisher {
 ///
 /// Without `confirm_select` the broker never sends Ack/Nack frames and the
 /// second `.await` on the confirm future blocks indefinitely.
-async fn open_channel(amqp_url: &str, exchange: &str) -> anyhow::Result<Channel> {
+async fn open_channel(amqp_url: &str, exchange: &str) -> anyhow::Result<(Connection, Channel)> {
     let conn = Connection::connect(amqp_url, ConnectionProperties::default())
         .await
         .context("Publisher: failed to connect to RabbitMQ")?;
@@ -139,5 +143,5 @@ async fn open_channel(amqp_url: &str, exchange: &str) -> anyhow::Result<Channel>
         .await
         .context("Publisher: exchange_declare")?;
 
-    Ok(channel)
+    Ok((conn, channel))
 }

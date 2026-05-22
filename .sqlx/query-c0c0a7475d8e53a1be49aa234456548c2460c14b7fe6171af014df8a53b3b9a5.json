@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE notification_log\n               SET status     = 'BLOCKED',\n                   last_error = $4,\n                   updated_at = now()\n             WHERE event_id     = $1\n               AND channel      = $2\n               AND recipient_id = $3\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c0c0a7475d8e53a1be49aa234456548c2460c14b7fe6171af014df8a53b3b9a5"
+}

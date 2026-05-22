@@ -15,8 +15,16 @@ pub struct ConsumerConfig {
     /// Maximum number of messages processed concurrently.
     /// Prevents unbounded task spawning under a message burst.
     pub max_concurrency: usize,
-    /// Maximum allowed size per fetched attachment in bytes.
-    /// Attachments exceeding this are permanently rejected (no retry).
+    /// Maximum allowed **total** size of all attachments in an event, in bytes.
+    ///
+    /// This is a cumulative limit across all attachments, not a per-file cap.
+    /// For example, with the default of 10 MiB: a single 9 MiB attachment
+    /// passes, but two 6 MiB attachments fail.  Events that exceed this limit
+    /// are permanently rejected (no retry) to avoid retaining large payloads
+    /// in memory across retry cycles.
+    ///
+    /// If you need a per-file limit, enforce it upstream before publishing the
+    /// event.
     pub max_attachment_bytes: usize,
     /// Maximum consecutive rate-limit backoff cycles before a recipient is
     /// permanently marked FAILED.

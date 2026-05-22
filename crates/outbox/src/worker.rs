@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use common::{
-    ChannelOverrides, EmailOptions, FromOverride, Metadata, NotificationEvent, Recipient, SendMode,
+    ChannelOverrides, EmailOptions, FromOverride, GroupRetryMode, Metadata, NotificationEvent,
+    Recipient, RetryPolicy, SendMode,
 };
 use lapin::{
     options::*, types::FieldTable, BasicProperties, Channel, Connection, ConnectionProperties,
@@ -372,6 +373,8 @@ async fn publish_and_mark(
                 from_override,
                 attachments,
                 sender_account,
+                group_retry_mode: GroupRetryMode::default(),
+                retry_policy: RetryPolicy::default(),
             }),
         },
     };
@@ -661,6 +664,8 @@ mod tests {
                     attachments: vec![],
                     sender_account: Some("transactional".into()),
                     send_mode: common::SendMode::Individual,
+                    group_retry_mode: common::GroupRetryMode::Individual,
+                    retry_policy: common::RetryPolicy::Retry,
                 }),
             },
         };

@@ -46,7 +46,7 @@ pub fn build_router(state: ApiState) -> Router {
             "/emails/{event_id}/recipients/{email}/retry",
             post(retry_recipient),
         )
-        // Template cache invalidation — useful after editing email_template rows
+        // Template cache invalidation — useful after editing notification_template rows
         // without restarting the service.
         .route("/templates/cache", delete(invalidate_all_template_cache))
         .route(

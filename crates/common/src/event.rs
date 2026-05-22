@@ -67,13 +67,13 @@ pub struct ChannelOverrides {
 /// Controls how multiple TO recipients in a single event are delivered.
 ///
 /// `Individual` (default) — each recipient in `recipients` is delivered as a
-/// completely separate email with its own `email_log` row, retry counter, and
+/// completely separate email with its own `notification_log` row, retry counter, and
 /// independent success / failure state.  Recipients cannot see each other's
 /// addresses.  This is the correct mode for transactional mail.
 ///
 /// `Group` — all recipients share one email.  Every address appears together
 /// in the `To:` header so recipients can see who else received the message.
-/// Only the first address gets an `email_log` row; the delivery is tracked and
+/// Only the first address gets an `notification_log` row; the delivery is tracked and
 /// retried as a unit.  Use for team notifications, shared alerts, or any
 /// context where mutual visibility is intentional.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,7 +95,7 @@ pub enum SendMode {
 ///
 /// `Individual` — on retry each recipient is re-processed independently,
 /// using the same individual-send path as `SendMode::Individual`.  The
-/// service inserts an `email_log` row per recipient at the time of the
+/// service inserts an `notification_log` row per recipient at the time of the
 /// **first** group send attempt, so re-delivery can skip addresses that
 /// already have a `SENT` row and only re-send to those still `PENDING` or
 /// `FAILED`.
@@ -168,7 +168,7 @@ impl SendMode {
 /// All email-specific options for a single event.
 ///
 /// One event can carry **multiple recipients** — the notification service
-/// processes each independently so every delivery has its own `email_log`
+/// processes each independently so every delivery has its own `notification_log`
 /// row, retry counter, and status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmailOptions {
@@ -184,7 +184,7 @@ pub struct EmailOptions {
     ///
     /// `Whole` (default) — retry the whole group email as a unit.
     /// `Individual` — fall back to per-recipient sends on retry, skipping
-    /// addresses that already have a `SENT` row in `email_log`.
+    /// addresses that already have a `SENT` row in `notification_log`.
     ///
     /// See [`GroupRetryMode`] for the full trade-off discussion.
     #[serde(default)]
@@ -220,7 +220,7 @@ pub struct EmailOptions {
     /// Zero or more CC recipients included in every delivery for this event.
     ///
     /// CC addresses are attached as `Cc:` headers and are visible to all
-    /// recipients. They are **not** processed independently: no `email_log`
+    /// recipients. They are **not** processed independently: no `notification_log`
     /// row is created per CC address, they bypass the recipient filter and
     /// rate-limiter, and they are not individually retried.
     ///
@@ -319,6 +319,7 @@ impl EmailEvent {
                     sender_account: self.sender_account,
                     send_mode: SendMode::Individual,
                     group_retry_mode: GroupRetryMode::Whole,
+                    retry_policy: RetryPolicy::default(),
                 }),
             },
         }

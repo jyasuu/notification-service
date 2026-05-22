@@ -1,8 +1,8 @@
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use common::{
-    AttachmentRef, ChannelOverrides, EmailOptions, FromOverride, Metadata, NotificationEvent,
-    Recipient,
+    AttachmentRef, ChannelOverrides, EmailOptions, FromOverride, GroupRetryMode, Metadata,
+    NotificationEvent, Recipient, RetryPolicy,
 };
 use dialoguer::Confirm;
 use lapin::{
@@ -141,13 +141,16 @@ pub async fn run(args: SendArgs, cfg: CliConfig) -> Result<()> {
                 attachments,
                 sender_account: None,
                 send_mode: common::SendMode::Individual,
+                group_retry_mode: GroupRetryMode::default(),
+                retry_policy: RetryPolicy::default(),
             }),
         },
     };
 
     // ── 7. Confirm ────────────────────────────────────────────────────────────
     // Convenience reference for the preview block below.
-    let email_opts = event.channel_overrides.email.as_ref().unwrap();
+    let email_opts = event.channel_overrides.email.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("event has no email channel override"))?;
     if !args.yes {
         let to_str: Vec<&str> = recipients.iter().map(|r| r.email.as_str()).collect();
         println!("About to publish:");
