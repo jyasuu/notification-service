@@ -14,7 +14,7 @@ use recipient_filter::RecipientFilter;
 use store::{
     EmailInsertPendingArgs, InsertResult, NotificationStore, TemplateStore, CHANNEL_EMAIL,
 };
-use tracing::{info, instrument, warn};
+use tracing::{error, info, instrument, warn};
 
 /// Pre-filtered CC and BCC recipient lists, computed **once per event** before
 /// per-recipient tasks are spawned.
@@ -156,35 +156,13 @@ pub async fn process_recipient(
     // accurately reflects what was actually delivered, not the raw unfiltered
     // input.  Storing pre-filter lists would show addresses that were never
     // delivered to, and would waste a filter cycle on every retry.
-    let cc_json = if effective_cc.is_empty() {
-        None
-    } else {
-        match serde_json::to_value(
-            effective_cc
-                .iter()
-                .map(|r| serde_json::json!({"email": r.email, "name": r.name}))
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|e| AppError::permanent_mailer(format!("failed to serialize cc: {e}")))
-        {
-            Ok(v) => Some(v),
-            Err(e) => return RecipientOutcome::Failed(e),
-        }
+    let cc_json = match serialize_recipient_list(effective_cc, "cc") {
+        Ok(v) => v,
+        Err(e) => return RecipientOutcome::Failed(e),
     };
-    let bcc_json = if effective_bcc.is_empty() {
-        None
-    } else {
-        match serde_json::to_value(
-            effective_bcc
-                .iter()
-                .map(|r| serde_json::json!({"email": r.email, "name": r.name}))
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|e| AppError::permanent_mailer(format!("failed to serialize bcc: {e}")))
-        {
-            Ok(v) => Some(v),
-            Err(e) => return RecipientOutcome::Failed(e),
-        }
+    let bcc_json = match serialize_recipient_list(effective_bcc, "bcc") {
+        Ok(v) => v,
+        Err(e) => return RecipientOutcome::Failed(e),
     };
 
     match ctx
@@ -233,14 +211,35 @@ pub async fn process_recipient(
     }
 
     // ── 5. Template rendering ────────────────────────────────────────────────
-    let (subject, body_html, body_text) = match (
-        render_template(&prefetched_template.subject, &event.payload),
-        render_html_template(&prefetched_template.body_html, &event.payload),
-        render_template(&prefetched_template.body_text, &event.payload),
-    ) {
+    // Render all three components and collect every error before returning.
+    // The original code surfaced only the first failure in the tuple match,
+    // silently discarding the second and third errors.  Collecting all errors
+    // gives operators a complete picture when triaging a broken template.
+    let subject_result = render_template(&prefetched_template.subject, &event.payload);
+    let html_result = render_html_template(&prefetched_template.body_html, &event.payload);
+    let text_result = render_template(&prefetched_template.body_text, &event.payload);
+
+    let (subject, body_html, body_text) = match (subject_result, html_result, text_result) {
         (Ok(s), Ok(h), Ok(t)) => (s, h, t),
-        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
-            return RecipientOutcome::Failed(e);
+        (sr, hr, tr) => {
+            // Log every component that failed, then return the first error.
+            // The original tuple-match (Err(e), _, _) | (_, Err(e), _) | ...
+            // silently discarded the second and third failures.
+            if let Err(ref e) = sr {
+                tracing::warn!(component = "subject",   error = %e, "Template render failed");
+            }
+            if let Err(ref e) = hr {
+                tracing::warn!(component = "body_html", error = %e, "Template render failed");
+            }
+            if let Err(ref e) = tr {
+                tracing::warn!(component = "body_text", error = %e, "Template render failed");
+            }
+            let first_err = sr
+                .err()
+                .or(hr.err())
+                .or(tr.err())
+                .expect("at least one Err");
+            return RecipientOutcome::Failed(first_err);
         }
     };
 
@@ -272,15 +271,22 @@ pub async fn process_recipient(
     };
 
     // ── 6. Rate-limit token ──────────────────────────────────────────────────
-    // Increment a counter each time we must wait so operators have a Prometheus
-    // signal to alert on when the service is being throttled.
-    counter!("email_rate_limit_waits_total",
-        "event_type" => event.event_type.clone())
-    .increment(1);
-    if !ctx.rate_limiter.wait_for_token(shutdown).await {
-        return RecipientOutcome::Failed(AppError::Queue(
-            "service shutdown during rate-limit wait".into(),
-        ));
+    // Only increment the counter when we had to actually wait — i.e. the
+    // service is being throttled.  Incrementing unconditionally (before the
+    // call) inflated the metric even when a token was immediately available,
+    // making it useless as a "we are being throttled" alert signal.
+    match ctx.rate_limiter.wait_for_token(shutdown).await {
+        rate_limiter::TokenResult::Acquired => {}
+        rate_limiter::TokenResult::AcquiredAfterWait => {
+            counter!("email_rate_limit_waits_total",
+                "event_type" => event.event_type.clone())
+            .increment(1);
+        }
+        rate_limiter::TokenResult::Shutdown => {
+            return RecipientOutcome::Failed(AppError::Queue(
+                "service shutdown during rate-limit wait".into(),
+            ));
+        }
     }
 
     // ── 7. Send ───────────────────────────────────────────────────────────────
@@ -306,6 +312,9 @@ pub async fn process_recipient(
                     "Email delivered but mark_sent DB write failed — \
                      row remains PENDING; re-delivery will attempt to re-send"
                 );
+                counter!("email_mark_sent_failed_total",
+                    "event_type" => event.event_type.clone())
+                .increment(1);
             }
             counter!("emails_sent_total",
                 "event_type" => event.event_type.clone())
@@ -326,6 +335,31 @@ pub async fn process_recipient(
             RecipientOutcome::Failed(e)
         }
     }
+}
+
+/// Serialize a non-empty recipient slice to a JSON value for storage in `notification_log`.
+///
+/// Returns `None` for an empty slice (stored as SQL NULL), or `Some(Value)`
+/// otherwise. Errors surface as `AppError::permanent_mailer` so callers can
+/// propagate them without a second DB write.
+///
+/// Used by both `process_recipient` and `process_group` to serialize the
+/// effective (post-filter) CC and BCC recipient lists. The `field` string
+/// ("cc" / "bcc") is included in error messages to aid diagnostics.
+fn serialize_recipient_list(
+    list: &[Recipient],
+    field: &str,
+) -> Result<Option<serde_json::Value>, AppError> {
+    if list.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_value(
+        list.iter()
+            .map(|r| serde_json::json!({"email": r.email, "name": r.name}))
+            .collect::<Vec<_>>(),
+    )
+    .map(Some)
+    .map_err(|e| AppError::permanent_mailer(format!("failed to serialize {field}: {e}")))
 }
 
 /// Maximum number of recipients allowed in a single group send.
@@ -442,7 +476,7 @@ pub async fn process_group(
             )));
         }
     }
-    let effective_cc: Vec<_> = email_opts
+    let effective_cc: Vec<Recipient> = email_opts
         .cc
         .iter()
         .filter(|r| match ctx.filter.check(&r.email) {
@@ -458,10 +492,20 @@ pub async fn process_group(
             }
             // Unexpected non-Blocked errors are treated as pass-through (fail-open):
             // an unknown filter error should never silently drop a CC recipient.
-            Err(_) => true,
+            Err(e) => {
+                error!(
+                    event_id = %event.event_id,
+                    email    = %r.email,
+                    error    = %e,
+                    "Unexpected (non-Blocked) error from recipient filter for CC address — \
+                     passing through (fail-open). Investigate filter health."
+                );
+                true
+            }
         })
+        .cloned()
         .collect();
-    let effective_bcc: Vec<_> = email_opts
+    let effective_bcc: Vec<Recipient> = email_opts
         .bcc
         .iter()
         .filter(|r| match ctx.filter.check(&r.email) {
@@ -477,8 +521,18 @@ pub async fn process_group(
             }
             // Unexpected non-Blocked errors are treated as pass-through (fail-open):
             // an unknown filter error should never silently drop a BCC recipient.
-            Err(_) => true,
+            Err(e) => {
+                error!(
+                    event_id = %event.event_id,
+                    email    = %r.email,
+                    error    = %e,
+                    "Unexpected (non-Blocked) error from recipient filter for BCC address — \
+                     passing through (fail-open). Investigate filter health."
+                );
+                true
+            }
         })
+        .cloned()
         .collect();
 
     // ── 3. Idempotency ───────────────────────────────────────────────────────
@@ -508,35 +562,13 @@ pub async fn process_group(
     // accurately reflects what was actually delivered, not the raw unfiltered
     // input.  Storing pre-filter lists would show addresses that were never
     // delivered to, and would waste a filter cycle on every retry.
-    let cc_json = if effective_cc.is_empty() {
-        None
-    } else {
-        match serde_json::to_value(
-            effective_cc
-                .iter()
-                .map(|r| serde_json::json!({"email": r.email, "name": r.name}))
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|e| AppError::permanent_mailer(format!("failed to serialize cc: {e}")))
-        {
-            Ok(v) => Some(v),
-            Err(e) => return RecipientOutcome::Failed(e),
-        }
+    let cc_json = match serialize_recipient_list(&effective_cc, "cc") {
+        Ok(v) => v,
+        Err(e) => return RecipientOutcome::Failed(e),
     };
-    let bcc_json = if effective_bcc.is_empty() {
-        None
-    } else {
-        match serde_json::to_value(
-            effective_bcc
-                .iter()
-                .map(|r| serde_json::json!({"email": r.email, "name": r.name}))
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|e| AppError::permanent_mailer(format!("failed to serialize bcc: {e}")))
-        {
-            Ok(v) => Some(v),
-            Err(e) => return RecipientOutcome::Failed(e),
-        }
+    let bcc_json = match serialize_recipient_list(&effective_bcc, "bcc") {
+        Ok(v) => v,
+        Err(e) => return RecipientOutcome::Failed(e),
     };
     let group_retry_mode_str = match email_opts.group_retry_mode {
         GroupRetryMode::Whole => "whole",
@@ -682,14 +714,35 @@ pub async fn process_group(
     let recipients = allowed_recipients;
 
     // ── 5. Template rendering ────────────────────────────────────────────────
-    let (subject, body_html, body_text) = match (
-        render_template(&prefetched_template.subject, &event.payload),
-        render_html_template(&prefetched_template.body_html, &event.payload),
-        render_template(&prefetched_template.body_text, &event.payload),
-    ) {
+    // Render all three components and collect every error before returning.
+    // The original code surfaced only the first failure in the tuple match,
+    // silently discarding the second and third errors.  Collecting all errors
+    // gives operators a complete picture when triaging a broken template.
+    let subject_result = render_template(&prefetched_template.subject, &event.payload);
+    let html_result = render_html_template(&prefetched_template.body_html, &event.payload);
+    let text_result = render_template(&prefetched_template.body_text, &event.payload);
+
+    let (subject, body_html, body_text) = match (subject_result, html_result, text_result) {
         (Ok(s), Ok(h), Ok(t)) => (s, h, t),
-        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
-            return RecipientOutcome::Failed(e);
+        (sr, hr, tr) => {
+            // Log every component that failed, then return the first error.
+            // The original tuple-match (Err(e), _, _) | (_, Err(e), _) | ...
+            // silently discarded the second and third failures.
+            if let Err(ref e) = sr {
+                tracing::warn!(component = "subject",   error = %e, "Template render failed");
+            }
+            if let Err(ref e) = hr {
+                tracing::warn!(component = "body_html", error = %e, "Template render failed");
+            }
+            if let Err(ref e) = tr {
+                tracing::warn!(component = "body_text", error = %e, "Template render failed");
+            }
+            let first_err = sr
+                .err()
+                .or(hr.err())
+                .or(tr.err())
+                .expect("at least one Err");
+            return RecipientOutcome::Failed(first_err);
         }
     };
 
@@ -730,15 +783,22 @@ pub async fn process_group(
     };
 
     // ── 6. Rate-limit token ──────────────────────────────────────────────────
-    // Increment a counter each time we must wait so operators have a Prometheus
-    // signal to alert on when the service is being throttled.
-    counter!("email_rate_limit_waits_total",
-        "event_type" => event.event_type.clone())
-    .increment(1);
-    if !ctx.rate_limiter.wait_for_token(shutdown).await {
-        return RecipientOutcome::Failed(AppError::Queue(
-            "service shutdown during rate-limit wait".into(),
-        ));
+    // Only increment the counter when we had to actually wait — i.e. the
+    // service is being throttled.  Incrementing unconditionally (before the
+    // call) inflated the metric even when a token was immediately available,
+    // making it useless as a "we are being throttled" alert signal.
+    match ctx.rate_limiter.wait_for_token(shutdown).await {
+        rate_limiter::TokenResult::Acquired => {}
+        rate_limiter::TokenResult::AcquiredAfterWait => {
+            counter!("email_rate_limit_waits_total",
+                "event_type" => event.event_type.clone())
+            .increment(1);
+        }
+        rate_limiter::TokenResult::Shutdown => {
+            return RecipientOutcome::Failed(AppError::Queue(
+                "service shutdown during rate-limit wait".into(),
+            ));
+        }
     }
 
     // ── 7. Send ───────────────────────────────────────────────────────────────
@@ -764,6 +824,9 @@ pub async fn process_group(
                     "Group email delivered but mark_sent DB write failed for primary — \
                      row remains PENDING; re-delivery will attempt to re-send"
                 );
+                counter!("email_mark_sent_failed_total",
+                    "event_type" => event.event_type.clone())
+                .increment(1);
             }
             // For GroupRetryMode::Individual, also mark every secondary row SENT.
             if email_opts.group_retry_mode == GroupRetryMode::Individual {
@@ -776,6 +839,9 @@ pub async fn process_group(
                             "Group email delivered but mark_sent DB write failed for secondary recipient — \
                              row remains PENDING; re-delivery will attempt to re-send"
                         );
+                        counter!("email_mark_sent_failed_total",
+                            "event_type" => event.event_type.clone())
+                        .increment(1);
                     }
                 }
             }
@@ -818,6 +884,12 @@ pub fn is_retryable(err: &AppError) -> bool {
         | AppError::NotFound(_)
         | AppError::Template(_)
         | AppError::Blocked(_) => false,
+        // UnknownStatus is a data-integrity error: the DB row has a status value
+        // this binary doesn't recognise.  Retrying will hit the same row and return
+        // the same unrecognised status indefinitely, burning retry budget and
+        // generating log noise.  Treat it as a permanent failure so it goes to DLQ
+        // where an operator can investigate.
+        AppError::UnknownStatus(_) => false,
         _ if err.is_permanent_mailer() => false,
         _ => true,
     }
@@ -835,6 +907,8 @@ fn error_reason_label(err: &AppError) -> &'static str {
         AppError::Template(_) => "template",
         AppError::Queue(_) => "queue",
         AppError::NotFound(_) => "not_found",
+        AppError::Deserialize(_) => "deserialize",
+        AppError::UnknownStatus(_) => "unknown_status",
         _ => "other",
     }
 }

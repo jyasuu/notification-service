@@ -201,6 +201,15 @@ pub async fn run(args: SendArgs, cfg: CliConfig) -> Result<()> {
         .await
         .context("Failed to create AMQP channel")?;
 
+    // Enable publisher confirms so the second `.await` on `basic_publish`
+    // actually waits for a broker Ack/Nack frame.  Without this the channel
+    // runs in "fire-and-forget" mode and the confirm future completes
+    // immediately regardless of whether the broker accepted the message.
+    channel
+        .confirm_select(lapin::options::ConfirmSelectOptions::default())
+        .await
+        .context("Failed to enable publisher confirms")?;
+
     // Declare exchange (idempotent — safe if consumer already declared it).
     channel
         .exchange_declare(

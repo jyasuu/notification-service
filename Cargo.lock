@@ -188,6 +188,7 @@ dependencies = [
  "chrono",
  "common",
  "lapin",
+ "metrics",
  "recipient_filter",
  "serde",
  "serde_json",
@@ -752,6 +753,7 @@ dependencies = [
 name = "consumer"
 version = "0.1.0"
 dependencies = [
+ "amq-protocol",
  "anyhow",
  "async-trait",
  "chrono",
@@ -3852,6 +3854,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "495b0abdce3dc1f8fd27240651c9e68890c14e9d9c61527b1ce44d8a5a7bd3d5"
 dependencies = [
  "cfg-if",
+ "native-tls",
  "p12-keystore",
  "rustls-connector",
  "rustls-pemfile",

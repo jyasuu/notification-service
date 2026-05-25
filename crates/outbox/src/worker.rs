@@ -399,6 +399,15 @@ async fn publish_and_mark(
 
     let body = serde_json::to_vec(&event)?;
 
+    // ORDERING: we publish to the broker BEFORE marking the row PUBLISHED.
+    // If the process crashes between these two operations the row stays
+    // IN_PROGRESS, the stale-lock reaper will eventually reset it to PENDING,
+    // and the worker will re-publish the event — producing a duplicate AMQP
+    // message.  The consumer's idempotency guard (insert_pending) handles this
+    // correctly: the duplicate message hits the same DB row and is skipped.
+    // This is an intentional at-least-once delivery tradeoff: the alternative
+    // (mark first, then publish) risks losing events if the publish fails after
+    // the row has already been marked PUBLISHED and the reaper won't retry it.
     channel
         .basic_publish(
             &cfg.exchange,

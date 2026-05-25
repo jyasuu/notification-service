@@ -47,6 +47,11 @@ port = 8080
 # API is isolated behind a private network (e.g. Kubernetes ClusterIP).
 # api_key = "change-me-in-production"
 
+# Set to true ONLY in dev/test when you intentionally want no authentication.
+# The service refuses to start if api_key is absent and this is false (the default).
+# Override via AN__HTTP__ALLOW_UNAUTHENTICATED=true.
+# allow_unauthenticated = false
+
 # Port for the Prometheus /metrics endpoint (never expose this publicly).
 metrics_port = 9091
 
@@ -81,6 +86,12 @@ template_cache_ttl_secs = 300  # 5 minutes
 # Default: 10 MiB. Override with AN__MAX_ATTACHMENT_BYTES.
 # See also: max_concurrency above for the peak-memory calculation.
 max_attachment_bytes = 10485760  # 10 * 1024 * 1024
+
+# How long (in seconds) to wait for in-flight tasks during graceful shutdown.
+# Increase if your SMTP server is slow to respond or max_concurrency is high.
+# Un-ACK'd messages are re-queued by the broker once this timeout elapses.
+# Override with AN__SHUTDOWN_TIMEOUT_SECS.
+shutdown_timeout_secs = 30
 
 # ── Choose one backend ────────────────────────────────────────────────────────
 #

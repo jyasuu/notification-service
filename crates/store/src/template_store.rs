@@ -84,15 +84,27 @@ impl TemplateStore {
         let cache_key = format!("{channel}:{event_type}");
 
         // ── 1. Cache hit (only when TTL is non-zero and entry is fresh) ───────
+        // Also record whether a stale entry exists so we can warn below without
+        // a second read-lock acquisition — the stale check previously opened a
+        // new read lock after the DB miss, which was redundant and could race.
+        let stale_entry_exists;
         if !self.cache_ttl.is_zero() {
             let cache = self.cache.read().await;
-            if let Some(entry) = cache.get(&cache_key) {
-                if entry.inserted_at.elapsed() < self.cache_ttl {
+            match cache.get(&cache_key) {
+                Some(entry) if entry.inserted_at.elapsed() < self.cache_ttl => {
                     debug!("Template cache hit");
                     return Ok(entry.template.clone());
                 }
-                debug!("Template cache expired");
+                Some(_) => {
+                    debug!("Template cache expired");
+                    stale_entry_exists = true;
+                }
+                None => {
+                    stale_entry_exists = false;
+                }
             }
+        } else {
+            stale_entry_exists = false;
         }
 
         // ── 2. DB lookup ──────────────────────────────────────────────────────
@@ -126,19 +138,18 @@ impl TemplateStore {
             return Ok(tpl);
         }
 
-        // No active DB row found — check for a stale cache entry.
-        {
-            let cache = self.cache.read().await;
-            if cache.contains_key(&cache_key) {
-                tracing::warn!(
-                    event_type,
-                    channel,
-                    cache_ttl_secs = self.cache_ttl.as_secs(),
-                    "Template '{event_type}' (channel '{channel}') not found in DB but a stale \
-                     cache entry is still active — expires after TTL or call \
-                     DELETE /templates/{event_type}/cache"
-                );
-            }
+        // No active DB row found — warn if a stale cache entry exists.
+        // The stale_entry_exists flag was captured from the initial read lock
+        // above, avoiding a second lock acquisition here.
+        if stale_entry_exists {
+            tracing::warn!(
+                event_type,
+                channel,
+                cache_ttl_secs = self.cache_ttl.as_secs(),
+                "Template '{event_type}' (channel '{channel}') not found in DB but a stale \
+                 cache entry is still active — expires after TTL or call \
+                 DELETE /templates/{event_type}/cache"
+            );
         }
 
         Err(AppError::Template(format!(

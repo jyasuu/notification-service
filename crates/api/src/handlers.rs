@@ -4,6 +4,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use metrics::counter;
 use chrono::Utc;
 use common::{
     is_valid_email, AppError, AttachmentRef, ChannelOverrides, EmailOptions, EmailStatus,
@@ -135,22 +136,48 @@ async fn republish_event(
         .collect();
 
     // ── 7. Deserialize typed fields from the detail ───────────────────────────
+    // Use map_err + ? instead of .ok() so that a malformed stored JSONB value
+    // surfaces as a 500 here rather than silently yielding None/empty and
+    // re-publishing with the wrong sender, no attachments, or missing CC/BCC.
     let from_override: Option<FromOverride> = detail
         .from_override
-        .as_ref()
-        .and_then(|v| serde_json::from_value(v.clone()).ok());
+        .map(|v| {
+            serde_json::from_value(v).map_err(|e| {
+                ApiError(AppError::permanent_mailer(format!(
+                    "stored from_override is malformed and cannot be deserialized: {e}"
+                )))
+            })
+        })
+        .transpose()?;
 
-    let attachments: Vec<AttachmentRef> =
-        serde_json::from_value(attachments_raw).unwrap_or_default();
+    let attachments: Vec<AttachmentRef> = serde_json::from_value(attachments_raw).map_err(|e| {
+        ApiError(AppError::permanent_mailer(format!(
+            "stored attachments JSON is malformed and cannot be deserialized: {e}"
+        )))
+    })?;
 
     let cc: Vec<Recipient> = detail
         .cc
-        .and_then(|v| serde_json::from_value(v).ok())
+        .map(|v| {
+            serde_json::from_value(v).map_err(|e| {
+                ApiError(AppError::permanent_mailer(format!(
+                    "stored cc JSON is malformed and cannot be deserialized: {e}"
+                )))
+            })
+        })
+        .transpose()?
         .unwrap_or_default();
 
     let bcc: Vec<Recipient> = detail
         .bcc
-        .and_then(|v| serde_json::from_value(v).ok())
+        .map(|v| {
+            serde_json::from_value(v).map_err(|e| {
+                ApiError(AppError::permanent_mailer(format!(
+                    "stored bcc JSON is malformed and cannot be deserialized: {e}"
+                )))
+            })
+        })
+        .transpose()?
         .unwrap_or_default();
 
     let send_mode = detail
@@ -229,7 +256,30 @@ async fn republish_event(
         },
     };
     let body = serde_json::to_vec(&event).map_err(|e| ApiError(AppError::Queue(e.to_string())))?;
-    state.publisher.publish(body).await.map_err(ApiError)?;
+
+    // ── Atomicity note ────────────────────────────────────────────────────────
+    // The DB rows were already reset to PENDING by the caller before this
+    // function runs. If the AMQP publish below fails, those rows stay PENDING
+    // with no message in the queue to drive them forward — they are "orphaned".
+    //
+    // Recovery: the Prometheus counter `retry_publish_failed_total` fires on
+    // every such failure. Alert on it. An operator can recover by calling the
+    // retry endpoint again once the broker is healthy; the consumer's idempotency
+    // check prevents double-processing if the first publish did succeed.
+    state.publisher.publish(body).await.map_err(|e| {
+        counter!("retry_publish_failed_total",
+            "event_id" => event_id.to_string())
+        .increment(1);
+        tracing::error!(
+            %event_id,
+            error = %e,
+            "AMQP publish failed after DB rows reset to PENDING — \
+             rows are now orphaned (stuck PENDING with no queue message). \
+             Re-call the retry endpoint once the broker recovers. \
+             Monitor `retry_publish_failed_total` to alert on this condition."
+        );
+        ApiError(e)
+    })?;
     Ok(())
 }
 

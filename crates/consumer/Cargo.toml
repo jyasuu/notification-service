@@ -21,6 +21,7 @@ chrono      = { workspace = true }
 uuid        = { workspace = true }
 
 lapin        = "2"
+amq-protocol = "7"   # direct dep for structured AMQPSoftError::NOTFOUND matching in runner.rs
 tokio-retry  = "0.3"
 futures-lite = "2"
 tokio-util   = { version = "0.7" }

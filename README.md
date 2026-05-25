@@ -276,6 +276,64 @@ SELECT notify_send_email(
 > logged at WARN level but does not cause the event to fail. TO recipients are
 > unaffected. Per-address retry is not available for CC/BCC.
 
+## CLI (`ns`)
+
+The `ns` binary in `crates/ns-cli` provides operator commands for inspecting and
+recovering notification state without touching the DB directly.
+
+### Required permissions per command
+
+| Command | DB access | AMQP access | HTTP API access |
+|---|---|---|---|
+| `ns status` | READ — `notification_log` | none | none |
+| `ns logs` | READ — `notification_log` | none | none |
+| `ns outbox` | READ — outbox table (business DB) | none | none |
+| `ns template list/show` | READ — `notification_template` | none | none |
+| `ns template flush` | none | none | DELETE `/templates/…/cache` (requires `api_key`) |
+| `ns send` | none | PUBLISH to `<exchange>` | none |
+| `ns retry` | none | none | POST `/emails/…/retry` (requires `api_key`) |
+| `ns health` | none | none | GET `/health` + `/ready` |
+
+#### Postgres role (read-only commands)
+
+```sql
+-- Minimal read-only role for ns status / logs / template list|show
+CREATE ROLE ns_cli_ro LOGIN PASSWORD 'changeme';
+GRANT CONNECT ON DATABASE anvil_notify TO ns_cli_ro;
+GRANT USAGE ON SCHEMA public TO ns_cli_ro;
+GRANT SELECT ON notification_log, notification_template TO ns_cli_ro;
+
+-- If using ns outbox against the business-service DB, grant similarly there:
+-- GRANT SELECT ON outbox TO ns_cli_ro;  -- (business-service DB)
+```
+
+`ns send` and `ns retry` do **not** need direct DB access. `ns send` only needs
+AMQP publish rights to the configured exchange. `ns retry` calls the HTTP API,
+so the operator needs a valid `api_key` (set `AN__HTTP__API_KEY` or
+`http.api_key` in `config/local.toml`).
+
+### Detecting orphaned PENDING rows
+
+If a retry endpoint call fails after the DB rows were reset to PENDING but
+before the AMQP publish completes (broker blip, process crash), the rows will
+remain PENDING indefinitely with no queue message to drive them.
+
+Detection: alert on the `retry_publish_failed_total` Prometheus counter.
+Recovery: re-call the retry endpoint once the broker is healthy. The consumer's
+idempotency check prevents double-processing if the first publish did succeed.
+
+### Migration drift check
+
+`migrations/business_db/` contains a subset of the migrations in `migrations/`
+that must also be applied to the upstream business-service database (shared
+schema objects such as the outbox table and `notify_send_email()`).
+
+Run the following in CI to detect accidental drift between the two directories:
+
+```bash
+bash scripts/check_business_db_migrations.sh
+```
+
 ## Known limitations
 
 ### Internationalized email addresses (IDN / EAI)

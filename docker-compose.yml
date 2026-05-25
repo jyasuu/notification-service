@@ -135,7 +135,7 @@ services:
   anvil-notify:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
     image: anvil-notify:latest
     restart: unless-stopped
     stop_grace_period: 35s
@@ -147,6 +147,7 @@ services:
     volumes:
       - ./config/local.toml:/app/config/local.toml:ro
     environment:
+      AN__HTTP__ALLOW_UNAUTHENTICATED: true
       AN__DATABASE__URL: >-
         postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-anvil_notify}
       AN__AMQP__URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672
@@ -171,7 +172,7 @@ services:
   outbox-worker:
     build:
       context: .
-      dockerfile: Dockerfile.outbox
+      dockerfile: Dockerfile.outbox.dev
     image: outbox-worker:latest
     restart: unless-stopped
     stop_grace_period: 35s

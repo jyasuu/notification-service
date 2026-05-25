@@ -50,6 +50,14 @@ impl Publisher {
     pub async fn publish(&self, body: Vec<u8>) -> Result<(), AppError> {
         let mut guard = self.inner.lock().await;
 
+        // NOTE: the mutex is held for the entire publish call, including the
+        // broker confirm await.  This means a slow broker (e.g. under disk
+        // pressure) will block any concurrent retry-API callers for the duration.
+        // In practice this is acceptable because retry calls are low-frequency
+        // operator actions, not high-throughput data-plane sends.  The simpler
+        // design (one connection shared via mutex) is preferred over the
+        // complexity of extracting the channel before releasing the lock, which
+        // would require Arc<Channel> and careful lapin clone semantics.
         // Try once with the current channel; on failure, reconnect and retry once.
         for attempt in 0..2u8 {
             let channel = match guard.as_ref() {
@@ -61,8 +69,8 @@ impl Publisher {
                         Ok(pair) => {
                             info!("Publisher: reconnected to RabbitMQ");
                             *guard = Some(pair);
-                            // SAFETY: we just assigned Some above.
-                            &guard.as_ref().unwrap().1
+                            // SAFETY: assigned Some(pair) on the line above.
+                            &guard.as_ref().expect("just assigned Some above").1
                         }
                         Err(e) => {
                             return Err(AppError::Queue(format!(

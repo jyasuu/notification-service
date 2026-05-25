@@ -28,6 +28,17 @@ use governor::{
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+/// Outcome of a [`MailRateLimiter::wait_for_token`] call.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TokenResult {
+    /// Token was available immediately — no throttling occurred.
+    Acquired,
+    /// Token was acquired after waiting — the service is being rate-limited.
+    AcquiredAfterWait,
+    /// Shutdown was signalled before a token became available.
+    Shutdown,
+}
+
 /// Configuration loaded from `[rate_limit]` in `config/default.toml`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RateLimitConfig {
@@ -90,23 +101,38 @@ impl MailRateLimiter {
     /// Wait asynchronously until a send token is available, or until `shutdown`
     /// is cancelled.
     ///
-    /// Returns `true` if a token was acquired, `false` if shutdown fired first.
-    /// When `false`, the caller should propagate the shutdown signal instead of
-    /// proceeding with the send — the semaphore permit is released promptly.
+    /// Returns [`TokenResult::Acquired`] if a token was immediately available,
+    /// [`TokenResult::AcquiredAfterWait`] if the caller had to be throttled,
+    /// or [`TokenResult::Shutdown`] if shutdown fired before a token was ready.
     ///
-    /// Returns `true` immediately when rate limiting is disabled.
-    pub async fn wait_for_token(&self, shutdown: &tokio_util::sync::CancellationToken) -> bool {
+    /// Callers should propagate [`TokenResult::Shutdown`] instead of proceeding
+    /// with the send.  The distinction between `Acquired` and `AcquiredAfterWait`
+    /// lets callers increment a throttle counter only when the service is actually
+    /// being rate-limited, rather than on every send.
+    ///
+    /// Returns [`TokenResult::Acquired`] immediately when rate limiting is disabled.
+    pub async fn wait_for_token(
+        &self,
+        shutdown: &tokio_util::sync::CancellationToken,
+    ) -> TokenResult {
         let Some(limiter) = &self.inner else {
-            return true;
+            return TokenResult::Acquired;
         };
+        // Try to grab a token without waiting first. `check` is non-blocking and
+        // returns Ok if a token is available right now.
+        if limiter.check().is_ok() {
+            debug!("Rate limit token acquired immediately");
+            return TokenResult::Acquired;
+        }
+        // No token available — we have to wait. This is the true throttle case.
         tokio::select! {
             _ = limiter.until_ready() => {
-                debug!("Rate limit token acquired");
-                true
+                debug!("Rate limit token acquired after wait");
+                TokenResult::AcquiredAfterWait
             }
             _ = shutdown.cancelled() => {
                 debug!("Rate limit wait interrupted by shutdown");
-                false
+                TokenResult::Shutdown
             }
         }
     }
@@ -120,7 +146,18 @@ impl MailRateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+    //
+    // We deliberately avoid wall-clock assertions such as `elapsed < 50ms` here.
+    // Those checks are inherently flaky under CI load (slow VMs, noisy neighbours,
+    // Tokio scheduling jitter) and provide almost no signal beyond "the async
+    // runtime is alive". Correctness is verified through the *return value* of
+    // `wait_for_token`: `TokenResult::Acquired` means no waiting occurred, while
+    // `TokenResult::AcquiredAfterWait` / `TokenResult::Shutdown` indicate that a
+    // wait did happen. Testing the actual timing of rate-limit delays would
+    // require a mock clock (e.g. `tokio::time::pause` + `advance`), which is
+    // left as a future improvement if sub-millisecond precision ever matters.
 
     #[tokio::test]
     async fn passthrough_when_disabled() {
@@ -129,10 +166,9 @@ mod tests {
             burst_size: 1,
         });
         assert!(rl.is_disabled());
-        let t = Instant::now();
         let shutdown = tokio_util::sync::CancellationToken::new();
-        assert!(rl.wait_for_token(&shutdown).await);
-        assert!(t.elapsed().as_millis() < 50);
+        // Disabled limiter must always return Acquired (no wait).
+        assert_eq!(rl.wait_for_token(&shutdown).await, TokenResult::Acquired);
     }
 
     #[tokio::test]
@@ -142,11 +178,30 @@ mod tests {
             burst_size: 5,
         });
         let shutdown = tokio_util::sync::CancellationToken::new();
-        let t = Instant::now();
+        // All 5 burst tokens must be acquired without waiting.
         for _ in 0..5 {
-            assert!(rl.wait_for_token(&shutdown).await);
+            assert_eq!(
+                rl.wait_for_token(&shutdown).await,
+                TokenResult::Acquired,
+                "all burst tokens should be available without waiting"
+            );
         }
-        assert!(t.elapsed().as_millis() < 200, "burst took too long");
+    }
+
+    #[tokio::test]
+    async fn throttle_returns_acquired_after_wait() {
+        let rl = MailRateLimiter::new(RateLimitConfig {
+            emails_per_second: 100,
+            burst_size: 1,
+        });
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        // Drain the burst token immediately.
+        assert_eq!(rl.wait_for_token(&shutdown).await, TokenResult::Acquired);
+        // Next call must wait — should return AcquiredAfterWait.
+        assert_eq!(
+            rl.wait_for_token(&shutdown).await,
+            TokenResult::AcquiredAfterWait
+        );
     }
 
     #[tokio::test]
@@ -156,15 +211,14 @@ mod tests {
             burst_size: 1,
         });
         let shutdown = tokio_util::sync::CancellationToken::new();
-        // Drain the one burst token
-        assert!(rl.wait_for_token(&shutdown).await);
-        // Cancel immediately — next wait should return false without blocking
+        // Drain the one burst token.
+        assert_eq!(rl.wait_for_token(&shutdown).await, TokenResult::Acquired);
+        // Cancel immediately — next wait must return Shutdown, not block.
         shutdown.cancel();
-        let t = Instant::now();
-        assert!(!rl.wait_for_token(&shutdown).await);
-        assert!(
-            t.elapsed().as_millis() < 50,
-            "cancelled wait should be instant"
+        assert_eq!(
+            rl.wait_for_token(&shutdown).await,
+            TokenResult::Shutdown,
+            "cancelled wait should return Shutdown without blocking"
         );
     }
 }

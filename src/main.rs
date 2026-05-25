@@ -214,12 +214,23 @@ async fn main() -> anyhow::Result<()> {
     info!("API publisher connected to RabbitMQ");
 
     // ── HTTP API ──────────────────────────────────────────────────────────────
-    if cfg.http.api_key.is_none() {
-        tracing::warn!(
-            "HTTP API authentication is DISABLED — all /emails/* and /templates/* endpoints \
-             are publicly accessible. Set AN__HTTP__API_KEY (or http.api_key in config) \
-             unless this service is isolated behind a private network."
-        );
+    match &cfg.http.api_key {
+        Some(_) => {}
+        None if cfg.http.allow_unauthenticated => {
+            tracing::error!(
+                "HTTP API authentication is DISABLED (allow_unauthenticated = true) — \
+                 all /emails/* and /templates/* endpoints are publicly accessible. \
+                 Do not use this setting in production."
+            );
+        }
+        None => {
+            anyhow::bail!(
+                "HTTP API has no api_key configured and allow_unauthenticated is not set. \
+                 Set AN__HTTP__API_KEY to a secret bearer token, or set \
+                 AN__HTTP__ALLOW_UNAUTHENTICATED=true to explicitly opt in to running \
+                 without authentication (dev/test only)."
+            );
+        }
     }
 
     let api_state = ApiState {
@@ -308,7 +319,7 @@ async fn main() -> anyhow::Result<()> {
     }
     shutdown.cancel();
 
-    let timeout = tokio::time::Duration::from_secs(30);
+    let timeout = tokio::time::Duration::from_secs(cfg.shutdown_timeout_secs);
     if tokio::time::timeout(timeout, async {
         let _ = api_task.await;
         let _ = consumer_task.await;
@@ -316,7 +327,7 @@ async fn main() -> anyhow::Result<()> {
     .await
     .is_err()
     {
-        tracing::warn!("Graceful shutdown timed out after 30 s — forcing exit");
+        tracing::warn!(shutdown_timeout_secs = cfg.shutdown_timeout_secs, "Graceful shutdown timed out — forcing exit");
     } else {
         info!("Graceful shutdown complete");
     }

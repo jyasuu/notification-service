@@ -1,0 +1,26 @@
+# ── Stage 4: runtime ──────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+# curl is required by the docker-compose healthcheck
+# (test: curl -sf http://localhost:8080/ready || exit 1).
+# Without it the container is never marked healthy and dependent
+# services cannot start.
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    curl \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY ./target/release/anvil-notify ./anvil-notify
+COPY ./migrations  ./migrations
+COPY ./config      ./config
+
+# Drop privileges
+RUN useradd -m -u 1001 appuser
+USER appuser
+
+EXPOSE 8080
+
+ENTRYPOINT ["./anvil-notify"]

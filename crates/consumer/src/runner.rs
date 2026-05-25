@@ -24,6 +24,27 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+/// Returns `true` when a lapin error is an AMQP 404 NOT_FOUND reply.
+///
+/// Used during topology setup to distinguish "queue does not exist yet"
+/// (normal first-run) from a genuine broker error (wrong args, auth, etc.).
+///
+/// Previously this was a string-match on `e.to_string()`, which was fragile
+/// against changes in how lapin formats error messages.  We now match on the
+/// structured `AMQPSoftError::NOTFOUND` variant from `amq_protocol`, which is
+/// generated directly from the AMQP 0-9-1 spec and is stable.
+fn is_not_found(e: &lapin::Error) -> bool {
+    use amq_protocol::protocol::{AMQPErrorKind, AMQPSoftError};
+    matches!(
+        e,
+        lapin::Error::ProtocolError(amqp_err)
+            if matches!(
+                amqp_err.kind(),
+                AMQPErrorKind::Soft(AMQPSoftError::NOTFOUND)
+            )
+    )
+}
+
 use crate::{config::ConsumerConfig, delivery::handle_delivery, processor::ProcessorContext};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -37,12 +58,20 @@ use crate::{config::ConsumerConfig, delivery::handle_delivery, processor::Proces
 /// useful in logs.
 fn scrub_amqp_url(url: &str) -> String {
     // amqp[s]://user:pass@host:port/vhost  →  amqp[s]://[redacted]@host:port/vhost
+    //
+    // Primary path: standard scheme + userinfo.
     if let Some(at_pos) = url.find('@') {
         if let Some(scheme_end) = url.find("://") {
             let scheme = &url[..scheme_end + 3]; // "amqp://" or "amqps://"
             let after_at = &url[at_pos + 1..];
             return format!("{scheme}[redacted]@{after_at}");
         }
+
+        // Defensive fallback: URL contains "@" but has no recognisable "://"
+        // (e.g. a misconfigured "amqp:user:pass@host" without the double-slash).
+        // Rather than logging the raw URL and leaking credentials, redact the
+        // entire string.  The operator can check their config for the correct URL.
+        return "[redacted — unrecognised URL format containing '@']".to_owned();
     }
     // No "@" means no embedded credentials — return the URL unchanged so the
     // broker hostname remains visible in logs (e.g. "amqps://broker.example.com:5671").
@@ -222,6 +251,42 @@ mod heartbeat_tests {
     }
 }
 
+#[cfg(test)]
+mod scrub_url_tests {
+    use super::scrub_amqp_url;
+
+    #[test]
+    fn redacts_standard_credentials() {
+        assert_eq!(
+            scrub_amqp_url("amqp://user:secret@broker.example.com:5672"),
+            "amqp://[redacted]@broker.example.com:5672"
+        );
+    }
+
+    #[test]
+    fn redacts_amqps_credentials() {
+        assert_eq!(
+            scrub_amqp_url("amqps://user:secret@broker.example.com:5671/vhost"),
+            "amqps://[redacted]@broker.example.com:5671/vhost"
+        );
+    }
+
+    #[test]
+    fn passthrough_when_no_at_sign() {
+        // No embedded credentials — broker hostname should be visible.
+        let url = "amqps://broker.example.com:5671";
+        assert_eq!(scrub_amqp_url(url), url);
+    }
+
+    #[test]
+    fn redacts_malformed_url_with_at_sign() {
+        // Misconfigured URL without "://" but still containing "@" —
+        // must never leak credentials, even if the format is unrecognised.
+        let result = scrub_amqp_url("amqp:user:secret@broker.example.com");
+        assert!(!result.contains("secret"), "credentials leaked: {result}");
+    }
+}
+
 // ── Topology ──────────────────────────────────────────────────────────────────
 
 async fn declare_topology(
@@ -270,17 +335,8 @@ async fn declare_topology(
                     "Queue already exists — skipping active declare"
                 );
             }
-            Err(ref e)
-                if {
-                    let s = e.to_string();
-                    s.contains("404") || s.contains("NOT_FOUND")
-                } =>
-            {
+            Err(ref e) if is_not_found(e) => {
                 // Queue does not exist yet — normal first-run path.
-                //
-                // TODO: replace string-match with a structured lapin error check
-                // when lapin exposes AMQP reply codes directly. The "404" string
-                // is stable in practice but fragile against future lapin changes.
                 info!(
                     queue = queue_name,
                     "Queue does not exist yet — will declare"

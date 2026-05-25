@@ -169,6 +169,47 @@ mod tests {
         assert!(!is_valid_email(&format!("{long_local}@example.com")));
     }
     #[test]
+    fn accepts_address_at_exactly_254_chars() {
+        // Construct local@domain such that total length == 254 (the RFC limit).
+        // local part: 64 chars (max allowed), domain: "a.com" = 5 chars,
+        // plus "@" = 1 char → 64 + 1 + 5 = 70. Pad domain to reach 254 total.
+        // 254 - 1 - 64 = 189 chars for the domain.  Build as "<label>.example.com"
+        // where label is 183 chars so label + ".example.com" (12) = 195... let's
+        // just compute directly.
+        let local = "a".repeat(64); // 64
+        let domain_len = 254 - 1 - 64; // 189 chars for the domain portion
+                                       // domain: 182 'x' chars + ".com" = 186 chars... adjust to hit exactly 254
+        let label = "x".repeat(domain_len - ".com".len()); // 185 chars
+        let domain = format!("{label}.com");
+        let addr = format!("{local}@{domain}");
+        assert_eq!(
+            addr.len(),
+            254,
+            "test setup: address must be exactly 254 chars"
+        );
+        assert!(is_valid_email(&addr), "254-char address should be valid");
+    }
+    #[test]
+    fn rejects_address_at_255_chars() {
+        // One byte over the RFC limit — must be rejected by the total-length check,
+        // independently of any per-component limit.  Use a short local part so the
+        // local-part check (64 chars) cannot mask a total-length failure.
+        let local = "ab"; // 2 chars
+        let domain_len = 255 - 1 - 2; // 252 chars for the domain
+        let label = "x".repeat(domain_len - ".com".len()); // 248 chars
+        let domain = format!("{label}.com");
+        let addr = format!("{local}@{domain}");
+        assert_eq!(
+            addr.len(),
+            255,
+            "test setup: address must be exactly 255 chars"
+        );
+        assert!(
+            !is_valid_email(&addr),
+            "255-char address should be rejected"
+        );
+    }
+    #[test]
     fn rejects_quoted_local_part() {
         assert!(!is_valid_email("\"user name\"@example.com"));
     }

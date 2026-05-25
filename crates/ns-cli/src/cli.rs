@@ -207,11 +207,37 @@ pub struct LogsArgs {
 
 // ── outbox ────────────────────────────────────────────────────────────────────
 
+/// Valid outbox row statuses accepted by `ns outbox --status`.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum OutboxStatus {
+    /// Waiting to be published to RabbitMQ (the common operator view).
+    #[default]
+    Pending,
+    /// Currently locked by the outbox worker.
+    InProgress,
+    /// Successfully published to RabbitMQ.
+    Published,
+    /// Failed to publish after all retries.
+    Failed,
+}
+
+impl OutboxStatus {
+    /// Return the SQL string used in `WHERE status = $1`.
+    pub fn as_sql_str(self) -> &'static str {
+        match self {
+            OutboxStatus::Pending => "PENDING",
+            OutboxStatus::InProgress => "IN_PROGRESS",
+            OutboxStatus::Published => "PUBLISHED",
+            OutboxStatus::Failed => "FAILED",
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 pub struct OutboxArgs {
-    /// Filter by status (PENDING, PUBLISHED, FAILED).
-    #[arg(long, short, default_value = "PENDING")]
-    pub status: String,
+    /// Filter by status.
+    #[arg(long, short, default_value = "pending", value_enum)]
+    pub status: OutboxStatus,
 
     /// Maximum rows to return.
     #[arg(long, short, default_value = "25")]
@@ -256,4 +282,9 @@ pub struct HealthArgs {
     /// Falls back to http://localhost:<http.port> from config.
     #[arg(long)]
     pub api_url: Option<String>,
+
+    /// Also check the /ready endpoint (validates DB connectivity).
+    /// Exits 1 if either /health or /ready returns a non-2xx response.
+    #[arg(long)]
+    pub ready: bool,
 }

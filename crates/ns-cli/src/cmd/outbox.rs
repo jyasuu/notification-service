@@ -10,7 +10,7 @@ use sqlx::postgres::PgPoolOptions;
 use tabled::Tabled;
 
 use crate::{
-    cli::{OutboxArgs, OutputFormat},
+    cli::{OutboxArgs, OutboxStatus, OutputFormat},
     config::CliConfig,
     output,
 };
@@ -53,14 +53,14 @@ pub async fn run(args: OutboxArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<
            WHERE  status = $1
            ORDER  BY created_at DESC
            LIMIT  $2"#,
-        args.status,
+        args.status.as_sql_str(),
         args.limit,
     )
     .fetch_all(&pool)
     .await?;
 
     if rows.is_empty() {
-        println!("(no {} outbox rows)", args.status);
+        println!("(no {} outbox rows)", args.status.as_sql_str());
         return Ok(());
     }
 

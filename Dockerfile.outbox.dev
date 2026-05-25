@@ -1,0 +1,17 @@
+# ── Stage 2: runtime ──────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY ./target/release/outbox-worker ./outbox-worker
+
+# Drop privileges
+RUN useradd -m -u 1001 appuser
+USER appuser
+
+ENTRYPOINT ["./outbox-worker"]

@@ -22,6 +22,8 @@
 //!
 //! Both lists are case-insensitive.
 
+use std::collections::HashSet;
+
 use common::AppError;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -49,12 +51,16 @@ pub struct FilterConfig {
 }
 
 /// A compiled, ready-to-query recipient filter.
+///
+/// All four lists are stored as `HashSet<String>` after construction so that
+/// every `check` call is O(1) regardless of list size.  The `Vec`-based config
+/// types are converted once in `new`.
 #[derive(Debug, Clone)]
 pub struct RecipientFilter {
-    blocked_emails: Vec<String>,
-    blocked_domains: Vec<String>,
-    allowed_emails: Vec<String>,
-    allowed_domains: Vec<String>,
+    blocked_emails: HashSet<String>,
+    blocked_domains: HashSet<String>,
+    allowed_emails: HashSet<String>,
+    allowed_domains: HashSet<String>,
     /// True when at least one allowlist entry is configured.
     allowlist_mode: bool,
 }
@@ -62,8 +68,9 @@ pub struct RecipientFilter {
 impl RecipientFilter {
     /// Build from config. All strings are normalised to lowercase on construction.
     pub fn new(cfg: FilterConfig) -> Self {
-        let norm =
-            |v: Vec<String>| -> Vec<String> { v.into_iter().map(|s| s.to_lowercase()).collect() };
+        let norm = |v: Vec<String>| -> HashSet<String> {
+            v.into_iter().map(|s| s.to_lowercase()).collect()
+        };
 
         let allowed_emails = norm(cfg.allowed_emails);
         let allowed_domains = norm(cfg.allowed_domains);
@@ -85,14 +92,14 @@ impl RecipientFilter {
         let domain = domain_of(&email_lc);
 
         // ── Blocklist (always applied, even in allowlist mode) ────────────────
-        if self.blocked_emails.iter().any(|b| b == &email_lc) {
+        if self.blocked_emails.contains(&email_lc) {
             debug!(email, "Recipient is on the email blocklist");
             return Err(AppError::Blocked(format!(
                 "{email} is on the blocked-email list"
             )));
         }
         if let Some(d) = &domain {
-            if self.blocked_domains.iter().any(|b| b == d) {
+            if self.blocked_domains.contains(d) {
                 debug!(email, domain = %d, "Recipient domain is on the blocklist");
                 return Err(AppError::Blocked(format!(
                     "{email}: domain '{d}' is on the blocked-domain list"
@@ -102,10 +109,10 @@ impl RecipientFilter {
 
         // ── Allowlist mode ────────────────────────────────────────────────────
         if self.allowlist_mode {
-            let email_allowed = self.allowed_emails.iter().any(|a| a == &email_lc);
+            let email_allowed = self.allowed_emails.contains(&email_lc);
             let domain_allowed = domain
                 .as_ref()
-                .map(|d| self.allowed_domains.iter().any(|a| a == d))
+                .map(|d| self.allowed_domains.contains(d))
                 .unwrap_or(false);
 
             if !email_allowed && !domain_allowed {
