@@ -27,6 +27,10 @@ impl IntoResponse for ApiError {
                 (StatusCode::UNPROCESSABLE_ENTITY, msg.clone())
             }
             AppError::Blocked(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            // Queue errors mean the AMQP broker is unavailable — this is a
+            // transient infrastructure problem, not a logic bug.  503 signals
+            // to callers (and load balancers) that retrying is appropriate.
+            AppError::Queue(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
             AppError::UnknownStatus(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("data integrity error: unknown status '{msg}' — check DB schema vs code version"),

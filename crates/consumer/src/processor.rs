@@ -575,10 +575,11 @@ pub async fn process_group(
         GroupRetryMode::Individual => "individual",
     };
 
-    // Helper function to build EmailInsertPendingArgs for a given recipient.
-    #[allow(clippy::too_many_arguments)]
-    fn make_args<'a>(
-        r: &'a Recipient,
+    // Shared (event-level) fields for every insert_pending call in this group send.
+    // Bundled into a struct so the inner `fn` below takes two parameters instead
+    // of eight, keeping clippy happy without the lifetime-inference limitation
+    // that prevents closures from expressing higher-ranked lifetimes (for<'a>).
+    struct SharedArgs<'a> {
         event: &'a NotificationEvent,
         email_opts: &'a common::EmailOptions,
         from_override_json: Option<&'a serde_json::Value>,
@@ -586,39 +587,36 @@ pub async fn process_group(
         cc_json: Option<&'a serde_json::Value>,
         bcc_json: Option<&'a serde_json::Value>,
         group_retry_mode_str: &'a str,
-    ) -> EmailInsertPendingArgs<'a> {
+    }
+    fn make_args<'a>(r: &'a Recipient, s: &'a SharedArgs<'a>) -> EmailInsertPendingArgs<'a> {
         EmailInsertPendingArgs {
-            event_id: event.event_id,
-            event_type: &event.event_type,
+            event_id: s.event.event_id,
+            event_type: &s.event.event_type,
             recipient_email: &r.email,
             recipient_name: r.name.as_deref(),
-            payload: &event.payload,
-            from_override: from_override_json,
-            attachments: attachments_json,
-            sender_account: email_opts.sender_account.as_deref(),
-            cc: cc_json,
-            bcc: bcc_json,
-            send_mode: email_opts.send_mode.as_str(),
-            group_retry_mode: Some(group_retry_mode_str),
-            event_timestamp: event.timestamp,
+            payload: &s.event.payload,
+            from_override: s.from_override_json,
+            attachments: s.attachments_json,
+            sender_account: s.email_opts.sender_account.as_deref(),
+            cc: s.cc_json,
+            bcc: s.bcc_json,
+            send_mode: s.email_opts.send_mode.as_str(),
+            group_retry_mode: Some(s.group_retry_mode_str),
+            event_timestamp: s.event.timestamp,
         }
     }
+    let shared = SharedArgs {
+        event,
+        email_opts,
+        from_override_json: from_override_json.as_ref(),
+        attachments_json: attachments_json.as_ref(),
+        cc_json: cc_json.as_ref(),
+        bcc_json: bcc_json.as_ref(),
+        group_retry_mode_str,
+    };
 
     // Always insert the primary row first.
-    let primary_insert = match ctx
-        .store
-        .insert_pending(&make_args(
-            primary,
-            event,
-            email_opts,
-            from_override_json.as_ref(),
-            attachments_json.as_ref(),
-            cc_json.as_ref(),
-            bcc_json.as_ref(),
-            group_retry_mode_str,
-        ))
-        .await
-    {
+    let primary_insert = match ctx.store.insert_pending(&make_args(primary, &shared)).await {
         Ok(r) => r,
         Err(e) => return RecipientOutcome::Failed(e),
     };
@@ -643,20 +641,7 @@ pub async fn process_group(
     // For GroupRetryMode::Individual, eagerly insert rows for every secondary recipient.
     if email_opts.group_retry_mode == GroupRetryMode::Individual {
         for r in recipients.iter().skip(1) {
-            if let Err(e) = ctx
-                .store
-                .insert_pending(&make_args(
-                    r,
-                    event,
-                    email_opts,
-                    from_override_json.as_ref(),
-                    attachments_json.as_ref(),
-                    cc_json.as_ref(),
-                    bcc_json.as_ref(),
-                    group_retry_mode_str,
-                ))
-                .await
-            {
+            if let Err(e) = ctx.store.insert_pending(&make_args(r, &shared)).await {
                 return RecipientOutcome::Failed(e);
             }
         }
@@ -684,10 +669,19 @@ pub async fn process_group(
                     recipient_count = recipients.len(),
                     "Group send: TO recipient blocked — excluding from delivery"
                 );
-                let _ = ctx
+                if let Err(ref db_err) = ctx
                     .store
                     .mark_blocked(event.event_id, &r.email, reason)
-                    .await;
+                    .await
+                {
+                    warn!(
+                        event_id = %event.event_id,
+                        email    = %r.email,
+                        error    = %db_err,
+                        "Group send: mark_blocked DB write failed — row remains PENDING; \
+                         operator should manually mark it BLOCKED or it will be retried"
+                    );
+                }
                 counter!("emails_blocked_total", "event_type" => event.event_type.clone())
                     .increment(1);
             }

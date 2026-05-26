@@ -146,6 +146,17 @@ async fn main() -> anyhow::Result<()> {
     // used when an event omits `sender_account` or names an unknown account.
     let mut sender_registry = SenderRegistry::new();
     for (name, acct) in &cfg.sender_accounts {
+        // Warn loudly when credentials are absent so operators catch the
+        // misconfiguration at startup rather than at first send.
+        // Empty credentials are intentional for no-auth relays (e.g. Mailpit),
+        // so this is a warning, not a hard failure.
+        if acct.username.is_empty() || acct.password.is_empty() {
+            tracing::warn!(
+                account = name,
+                from_email = acct.from_email,
+                "Named sender account has empty username or password —                  this is only correct for no-auth SMTP relays (e.g. Mailpit).                  Set username and password in [sender_accounts.{name}] if auth is required."
+            );
+        }
         let acct_sender = SmtpSender::new(mailer::smtp::SmtpConfig {
             host: acct.host.clone(),
             port: acct.port,
@@ -327,7 +338,10 @@ async fn main() -> anyhow::Result<()> {
     .await
     .is_err()
     {
-        tracing::warn!(shutdown_timeout_secs = cfg.shutdown_timeout_secs, "Graceful shutdown timed out — forcing exit");
+        tracing::warn!(
+            shutdown_timeout_secs = cfg.shutdown_timeout_secs,
+            "Graceful shutdown timed out — forcing exit"
+        );
     } else {
         info!("Graceful shutdown complete");
     }

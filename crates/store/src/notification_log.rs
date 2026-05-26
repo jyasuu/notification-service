@@ -69,7 +69,7 @@ pub const CHANNEL_EMAIL: &str = "email";
 pub struct EventDeliveryDetail {
     pub event_type: String,
     pub payload: serde_json::Value,
-    pub event_timestamp: Option<DateTime<Utc>>,
+    pub event_timestamp: DateTime<Utc>,
     pub earliest_created_at: DateTime<Utc>,
     pub from_override: Option<serde_json::Value>,
     pub sender_account: Option<String>,
@@ -256,7 +256,7 @@ impl NotificationStore for EmailNotificationStore {
 
     #[instrument(skip(self))]
     async fn mark_sent(&self, event_id: Uuid, recipient_id: &str) -> Result<(), AppError> {
-        sqlx::query!(
+        let result = sqlx::query!(
             r#"
             UPDATE notification_log
                SET status = 'SENT',
@@ -272,6 +272,13 @@ impl NotificationStore for EmailNotificationStore {
         )
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            tracing::warn!(
+                %event_id,
+                recipient_id,
+                "mark_sent matched no rows — row may have been deleted or recipient_id is wrong"
+            );
+        }
         Ok(())
     }
 
@@ -284,7 +291,7 @@ impl NotificationStore for EmailNotificationStore {
         exhausted: bool,
     ) -> Result<(), AppError> {
         let status = if exhausted { "FAILED" } else { "PENDING" };
-        sqlx::query!(
+        let result = sqlx::query!(
             r#"
             UPDATE notification_log
                SET retry_count    = retry_count + 1,
@@ -304,6 +311,14 @@ impl NotificationStore for EmailNotificationStore {
         )
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            tracing::warn!(
+                %event_id,
+                recipient_id,
+                status,
+                "mark_failed matched no rows — row may have been deleted or recipient_id is wrong"
+            );
+        }
         Ok(())
     }
 
@@ -314,7 +329,7 @@ impl NotificationStore for EmailNotificationStore {
         recipient_id: &str,
         reason: &str,
     ) -> Result<(), AppError> {
-        sqlx::query!(
+        let result = sqlx::query!(
             r#"
             UPDATE notification_log
                SET status     = 'BLOCKED',
@@ -331,6 +346,13 @@ impl NotificationStore for EmailNotificationStore {
         )
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            tracing::warn!(
+                %event_id,
+                recipient_id,
+                "mark_blocked matched no rows — row may have been deleted or recipient_id is wrong"
+            );
+        }
         Ok(())
     }
 
@@ -364,6 +386,11 @@ impl NotificationStore for EmailNotificationStore {
             WHERE n.event_id = $1
               AND n.channel  = $2
             ORDER BY n.created_at
+            -- Safety cap: prevents a single pathological event with thousands of
+            -- recipients from loading the full result set into the API pod's memory.
+            -- 500 rows is well above any legitimate multi-recipient event; a bulk
+            -- campaign accidentally routed here would otherwise cause an OOM.
+            LIMIT 500
             "#,
             event_id,
             CHANNEL_EMAIL,
@@ -381,6 +408,7 @@ impl NotificationStore for EmailNotificationStore {
                     id: r.id,
                     event_id: r.event_id,
                     event_type: r.event_type,
+                    channel: CHANNEL_EMAIL.to_owned(),
                     recipient_email: r.recipient_email,
                     recipient_name: r.recipient_name,
                     status: NotificationStatus::try_from(r.status.as_str())?,
@@ -450,6 +478,7 @@ impl NotificationStore for EmailNotificationStore {
             id: r.id,
             event_id: r.event_id,
             event_type: r.event_type,
+            channel: CHANNEL_EMAIL.to_owned(),
             recipient_email: r.recipient_email,
             recipient_name: r.recipient_name,
             status: NotificationStatus::try_from(r.status.as_str())?,
@@ -610,7 +639,7 @@ impl NotificationStore for EmailNotificationStore {
         Ok(EventDeliveryDetail {
             event_type: first.event_type.clone(),
             payload: first.payload.clone(),
-            event_timestamp: Some(first.event_timestamp),
+            event_timestamp: first.event_timestamp,
             earliest_created_at,
             from_override: first.from_override.clone(),
             sender_account: first.sender_account.clone(),

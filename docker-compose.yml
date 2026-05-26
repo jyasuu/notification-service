@@ -172,8 +172,9 @@ services:
   outbox-worker:
     build:
       context: .
-      dockerfile: Dockerfile.outbox.dev
-    image: outbox-worker:latest
+      dockerfile: Dockerfile.dev
+    entrypoint: ["outbox-worker"]
+    image: anvil-notify:latest
     restart: unless-stopped
     stop_grace_period: 35s
     depends_on:

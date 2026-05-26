@@ -131,6 +131,11 @@ pub struct NotificationLog {
     pub id: Uuid,
     pub event_id: Uuid,
     pub event_type: String,
+    /// Delivery channel: "email", and in the future "sms", "push", etc.
+    /// Stored explicitly so `core()` can reflect the actual channel rather
+    /// than hardcoding "email", which would produce wrong values once other
+    /// channels share this struct.
+    pub channel: String,
     pub status: NotificationStatus,
     pub retry_count: i32,
     pub total_attempts: i32,
@@ -159,7 +164,7 @@ impl NotificationLog {
             id: self.id,
             event_id: self.event_id,
             event_type: self.event_type.clone(),
-            channel: "email".into(),
+            channel: self.channel.clone(),
             recipient_id: self.recipient_email.clone(),
             status: self.status.clone(),
             retry_count: self.retry_count,

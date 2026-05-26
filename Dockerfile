@@ -25,7 +25,10 @@ RUN cargo chef cook --release --recipe-path recipe.json
 # ── Stage 3: build workspace ──────────────────────────────────────────────────
 # Deps are already compiled above. Only workspace crates recompile here.
 COPY . .
-RUN cargo build --release
+
+RUN rustup target add x86_64-unknown-linux-musl
+ENV CC_x86_64_unknown_linux_musl=musl-gcc
+RUN cargo build --release  --target=x86_64-unknown-linux-musl
 
 # ── Stage 4: runtime ──────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime

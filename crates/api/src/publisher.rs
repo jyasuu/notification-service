@@ -9,6 +9,31 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+/// How long to wait for a broker publish-confirm before treating the publish
+/// as failed.  Under RabbitMQ flow control or disk pressure the broker may
+/// stop sending Ack/Nack frames indefinitely; without this timeout the mutex
+/// would be held forever, blocking all concurrent retry-API callers.
+///
+/// 10 s is generous for a local/LAN broker; increase if your broker is remote
+/// and subject to high latency.
+const CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Redact credentials from an AMQP URL before storing or logging.
+/// Same pattern as `runner.rs::scrub_amqp_url` — kept local to avoid a
+/// cross-crate dependency on consumer internals.
+#[allow(dead_code)]
+fn scrub_amqp_url(url: &str) -> String {
+    if let Some(at_pos) = url.find('@') {
+        if let Some(scheme_end) = url.find("://") {
+            let scheme = &url[..scheme_end + 3];
+            let after_at = &url[at_pos + 1..];
+            return format!("{scheme}[redacted]@{after_at}");
+        }
+        return "[redacted — unrecognised URL format containing '@']".to_owned();
+    }
+    url.to_owned()
+}
+
 /// Thin wrapper around an AMQP channel used by the HTTP API to re-enqueue
 /// events whose DB rows have been reset to PENDING via the retry endpoints.
 ///
@@ -95,8 +120,14 @@ impl Publisher {
 
             match result {
                 Ok(confirm) => {
-                    return confirm
+                    // Wait for the broker Ack/Nack with a timeout so that
+                    // a broker under flow control or disk pressure cannot
+                    // stall this call (and hold the mutex) indefinitely.
+                    return tokio::time::timeout(CONFIRM_TIMEOUT, confirm)
                         .await
+                        .map_err(|_| AppError::Queue(
+                            format!("Publisher: broker confirm timed out after {}s —                                      message may or may not have been persisted;                                      retry the operation", CONFIRM_TIMEOUT.as_secs())
+                        ))?
                         .map(|_| ())
                         .map_err(|e| AppError::Queue(e.to_string()));
                 }

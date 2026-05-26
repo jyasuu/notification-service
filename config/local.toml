@@ -66,3 +66,30 @@ connection_timeout_ms = 2000   # default: 5000
 read_timeout_ms       = 5000   # default: 10000
 write_timeout_ms      = 5000   # default: 10000
 pool_size             = 2      # small pool is fine for dev; default: 5
+
+# ── Named sender accounts (dev) ───────────────────────────────────────────────
+# A "mailpit" account is pre-configured so developers can test the
+# multi-sender-account code path without needing real SMTP credentials.
+# Events that set "sender_account": "mailpit" in their payload will use
+# this entry; all other events fall back to the global [mailer] above,
+# which also points at Mailpit.
+#
+# The Mailpit UI is at http://localhost:8025 — all sent mail appears there
+# regardless of which account delivered it.
+#
+# To test a real named account alongside Mailpit, add another entry here:
+#   [sender_accounts.production_smtp]
+#   host       = "smtp.example.com"
+#   port       = 587
+#   username   = "user@example.com"
+#   password   = "secret"
+#   from_email = "noreply@example.com"
+#   from_name  = "My App"
+[sender_accounts.mailpit]
+host       = "mailpit"          # docker-compose service name
+port       = 1025
+username   = ""                 # Mailpit requires no authentication
+password   = ""
+from_email = "mailpit-account@example.com"
+from_name  = "AnvilNotify Dev (mailpit account)"
+tls_mode   = "none"

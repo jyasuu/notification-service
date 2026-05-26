@@ -70,7 +70,7 @@ pub async fn fetch_attachments_with_limit(
     // ── 1. Validate metadata for every attachment before any network call ─────
     for att_ref in refs {
         att_ref
-            .validate(event_timestamp)
+            .validate(event_timestamp, chrono::Utc::now())
             .map_err(AppError::permanent_mailer)?;
     }
 
@@ -231,6 +231,28 @@ async fn fetch_one(
         )));
     }
 
+    // Cross-check the response Content-Type against the declared type.
+    // A mismatch often means the URL has expired and the storage provider
+    // returned an HTML error page instead of the intended file.
+    // Logged as a warning rather than a hard failure so a legitimate type
+    // mismatch (e.g. "application/pdf" vs "application/pdf; charset=utf-8")
+    // doesn't break delivery — the bytes are still attached as declared.
+    if let Some(resp_ct) = resp.headers().get(reqwest::header::CONTENT_TYPE) {
+        if let Ok(resp_ct_str) = resp_ct.to_str() {
+            // Compare only the base type (before any ';' parameters).
+            let resp_base = resp_ct_str.split(';').next().unwrap_or("").trim();
+            let declared_base = att_ref.content_type.split(';').next().unwrap_or("").trim();
+            if !resp_base.is_empty() && resp_base != declared_base {
+                warn!(
+                    filename   = %att_ref.filename,
+                    declared   = %att_ref.content_type,
+                    response   = %resp_ct_str,
+                    "Attachment Content-Type mismatch —                      the URL may have expired and returned an error page.                      Attaching bytes using the declared type."
+                );
+            }
+        }
+    }
+
     // Read body with size cap to prevent memory exhaustion.
     let bytes = resp.bytes().await.map_err(|e| {
         AppError::transient_mailer(format!("attachment '{}' read error: {e}", att_ref.filename))
@@ -268,20 +290,20 @@ mod tests {
     fn validate_rejects_empty_url() {
         let mut a = att_ref("https://example.com/file.pdf");
         a.url = "".into();
-        assert!(a.validate(&Utc::now()).is_err());
+        assert!(a.validate(&Utc::now(), Utc::now()).is_err());
     }
 
     #[test]
     fn validate_rejects_non_http_url() {
         let a = att_ref("ftp://example.com/file.pdf");
-        assert!(a.validate(&Utc::now()).is_err());
+        assert!(a.validate(&Utc::now(), Utc::now()).is_err());
     }
 
     #[test]
     fn validate_rejects_path_separator_in_filename() {
         let mut a = att_ref("https://example.com/file.pdf");
         a.filename = "../../etc/passwd".into();
-        assert!(a.validate(&Utc::now()).is_err());
+        assert!(a.validate(&Utc::now(), Utc::now()).is_err());
     }
 
     #[test]
@@ -294,12 +316,57 @@ mod tests {
             max_age_secs: Some(0),
         };
         let ts = Utc::now() - chrono::Duration::seconds(10);
-        assert!(a.validate(&ts).unwrap_err().contains("expired"));
+        assert!(a.validate(&ts, Utc::now()).unwrap_err().contains("expired"));
     }
 
     #[test]
     fn validate_accepts_valid_ref() {
         let a = att_ref("https://example.com/invoice.pdf");
-        assert!(a.validate(&Utc::now()).is_ok());
+        assert!(a.validate(&Utc::now(), Utc::now()).is_ok());
+    }
+
+    /// Deterministic expiry test: pin both event_timestamp and check_time so
+    /// the test never depends on wall-clock speed or CI timing.
+    ///
+    /// event_timestamp = T0
+    /// check_time      = T0 + 120s  (2 minutes later)
+    /// max_age_secs    = 60         (1 minute TTL)
+    ///
+    /// Age at check_time = 120s > max_age_secs (60s) → must be rejected.
+    #[test]
+    fn validate_expiry_is_deterministic_with_fixed_check_time() {
+        use chrono::TimeZone;
+        let t0 = chrono::Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let check_time = t0 + chrono::Duration::seconds(120);
+        let a = AttachmentRef {
+            url: "https://example.com/doc.pdf".into(),
+            filename: "doc.pdf".into(),
+            content_type: "application/pdf".into(),
+            fetch_token: None,
+            max_age_secs: Some(60),
+        };
+        assert!(
+            a.validate(&t0, check_time).unwrap_err().contains("expired"),
+            "attachment should be expired: age 120s > max_age_secs 60s"
+        );
+    }
+
+    /// Confirm that an attachment is valid when check_time is before expiry.
+    #[test]
+    fn validate_not_expired_when_check_time_within_max_age() {
+        use chrono::TimeZone;
+        let t0 = chrono::Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let check_time = t0 + chrono::Duration::seconds(30);
+        let a = AttachmentRef {
+            url: "https://example.com/doc.pdf".into(),
+            filename: "doc.pdf".into(),
+            content_type: "application/pdf".into(),
+            fetch_token: None,
+            max_age_secs: Some(60),
+        };
+        assert!(
+            a.validate(&t0, check_time).is_ok(),
+            "attachment should be valid: age 30s < max_age_secs 60s"
+        );
     }
 }

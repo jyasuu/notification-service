@@ -87,7 +87,7 @@ pub async fn run(args: SendArgs, cfg: CliConfig) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
 
     for att in &attachments {
-        att.validate(&Utc::now())
+        att.validate(&Utc::now(), Utc::now())
             .map_err(|e| anyhow::anyhow!("Attachment validation failed: {e}"))?;
     }
 

@@ -67,23 +67,39 @@ pub async fn run_outbox_worker(
     let reaper_pool = pool.clone();
     let reaper_timeout = Duration::from_secs(cfg.stale_lock_timeout_secs);
     let reaper_shutdown = shutdown.clone();
-    tokio::spawn(run_reaper(reaper_pool, reaper_timeout, reaper_shutdown));
+    // Hold the handle so that a reaper panic is surfaced at shutdown rather
+    // than silently swallowed by Tokio's default spawn behaviour.
+    // The reaper observes the same CancellationToken so it exits on its own
+    // once shutdown is signalled; we abort() here only as a last resort.
+    let reaper_handle = tokio::spawn(run_reaper(reaper_pool, reaper_timeout, reaper_shutdown));
 
     let mut reconnect_delay = Duration::from_secs(2);
+
+    // Helper macro: abort the reaper and log any panic before returning.
+    // A plain abort() is safe here because the reaper holds no locks or
+    // un-ACK'd DB transactions — it only reads and updates outbox rows.
+    macro_rules! shutdown_reaper {
+        () => {
+            reaper_handle.abort();
+        };
+    }
 
     loop {
         if shutdown.is_cancelled() {
             info!("Outbox worker: shutdown requested");
+            shutdown_reaper!();
             return Ok(());
         }
 
         match connect_amqp_and_poll(&cfg, &pool, shutdown.clone()).await {
             Ok(()) => {
                 info!("Outbox worker: exiting cleanly");
+                shutdown_reaper!();
                 return Ok(());
             }
             Err(e) if shutdown.is_cancelled() => {
                 info!(error = %e, "Outbox worker: exited after shutdown");
+                shutdown_reaper!();
                 return Ok(());
             }
             Err(e) => {

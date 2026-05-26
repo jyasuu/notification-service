@@ -10,7 +10,7 @@ use sqlx::postgres::PgPoolOptions;
 use tabled::Tabled;
 
 use crate::{
-    cli::{OutboxArgs, OutboxStatus, OutputFormat},
+    cli::{OutboxArgs, OutputFormat},
     config::CliConfig,
     output,
 };

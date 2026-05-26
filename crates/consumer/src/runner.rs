@@ -344,9 +344,16 @@ async fn declare_topology(
             }
             Err(e) => {
                 // 406 PRECONDITION_FAILED or other error — surface it clearly.
+                // Common causes:
+                //   • Queue was declared without the x-dead-letter-exchange arg and
+                //     now AnvilNotify is trying to add it (delete the queue first).
+                //   • Queue `durable` flag differs from the existing declaration.
+                //   • A different DLX name was used previously.
                 return Err(anyhow::anyhow!(
-                    "Passive queue check for '{}' failed (possible argument mismatch): {e}",
-                    queue_name
+                    "Passive queue check for '{queue_name}' failed — this is usually a \
+                     queue argument mismatch (e.g. x-dead-letter-exchange or durable flag \
+                     changed). Delete the queue from the broker and restart to re-declare it. \
+                     Broker error: {e}"
                 ));
             }
         }

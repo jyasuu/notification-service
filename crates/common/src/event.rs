@@ -370,7 +370,15 @@ pub struct AttachmentRef {
 
 impl AttachmentRef {
     /// Validate metadata fields that can be checked without a network call.
-    pub fn validate(&self, event_timestamp: &DateTime<Utc>) -> Result<(), String> {
+    ///
+    /// `check_time` is the wall-clock instant at which expiry is evaluated.
+    /// Callers should pass `Utc::now()` in production; tests may pass a fixed
+    /// instant to exercise expiry logic deterministically without sleeping.
+    pub fn validate(
+        &self,
+        event_timestamp: &DateTime<Utc>,
+        check_time: DateTime<Utc>,
+    ) -> Result<(), String> {
         if self.url.is_empty() {
             return Err("permanent: attachment url must not be empty".into());
         }
@@ -396,7 +404,7 @@ impl AttachmentRef {
             ));
         }
         if let Some(max_age) = self.max_age_secs {
-            let age = Utc::now()
+            let age = check_time
                 .signed_duration_since(*event_timestamp)
                 .num_seconds()
                 .max(0) as u64;
@@ -466,4 +474,53 @@ pub struct Recipient {
 pub struct Metadata {
     #[serde(default)]
     pub source: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── deserialize_recipients edge cases ────────────────────────────────────
+
+    /// A normal array of recipient objects should deserialize correctly.
+    #[test]
+    fn deserialize_recipients_accepts_array() {
+        let json = r#"{"recipients": [{"email": "a@example.com"}, {"email": "b@example.com"}]}"#;
+        let opts: EmailOptions = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(opts.recipients.len(), 2);
+    }
+
+    /// A singular `recipient` key with a single object (legacy shape) should
+    /// be promoted to a one-element Vec.
+    #[test]
+    fn deserialize_recipients_accepts_singular_object() {
+        let json = r#"{"recipient": {"email": "a@example.com"}}"#;
+        let opts: EmailOptions = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(opts.recipients.len(), 1);
+        assert_eq!(opts.recipients[0].email, "a@example.com");
+    }
+
+    /// `"recipient": null` is an invalid payload — the deserializer must return
+    /// an error rather than silently producing an empty Vec or panicking.
+    /// Documents the current behaviour so any future change is intentional.
+    #[test]
+    fn deserialize_recipients_rejects_null_value() {
+        let json = r#"{"recipient": null}"#;
+        let result = serde_json::from_str::<EmailOptions>(json);
+        assert!(
+            result.is_err(),
+            "null recipient should produce a deserialization error, got: {:?}",
+            result
+        );
+    }
+
+    /// An empty array is technically valid JSON but produces zero recipients;
+    /// the consumer will reject it at the filter step, but deserialization
+    /// itself should succeed so the error surface is consistent.
+    #[test]
+    fn deserialize_recipients_accepts_empty_array() {
+        let json = r#"{"recipients": []}"#;
+        let opts: EmailOptions = serde_json::from_str(json).expect("should deserialize");
+        assert!(opts.recipients.is_empty());
+    }
 }

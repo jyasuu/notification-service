@@ -4,12 +4,12 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use metrics::counter;
 use chrono::Utc;
 use common::{
     is_valid_email, AppError, AttachmentRef, ChannelOverrides, EmailOptions, EmailStatus,
     FromOverride, Metadata, NotificationEvent, Recipient, RetryPolicy,
 };
+use metrics::counter;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -77,10 +77,8 @@ async fn republish_event(
     // by the business service).  This ensures attachment expiry checks use the
     // publication time, not the consumer processing time.
     //
-    // For pre-0023 rows where event_timestamp is NULL, fall back to the
-    // earliest created_at across all rows — the same proxy used before the
-    // column existed.
-    let original_timestamp = detail.event_timestamp.unwrap_or(detail.earliest_created_at);
+    // The column is NOT NULL (migration 0024), so this is always present.
+    let original_timestamp = detail.event_timestamp;
 
     // ── 5. Attachment expiry check ────────────────────────────────────────────
     let attachments_raw = detail
@@ -235,6 +233,18 @@ async fn republish_event(
     }
 
     // ── 10. Build and publish the replay envelope ─────────────────────────────
+    //
+    // Guard: if the stored payload is JSON null the template renderer will
+    // fail with a Template error on every consumer attempt, silently DLQ-ing
+    // the message.  Surface this as a 400 here so the operator knows the row
+    // needs repairing before a retry will work.
+    if detail.payload.is_null() {
+        return Err(ApiError(AppError::permanent_mailer(
+            "stored payload is null — the notification_log row must be repaired              with a valid JSON payload before this event can be retried"
+                .to_owned(),
+        )));
+    }
+
     let event = NotificationEvent {
         event_id,
         timestamp: original_timestamp,
@@ -297,12 +307,27 @@ pub async fn health() -> impl IntoResponse {
 ///
 /// Readiness probe — verifies the DB pool can acquire a connection.
 /// Docker / Kubernetes should use this for `healthcheck`, not /health.
+///
+/// Uses a short 500 ms timeout so that a saturated connection pool (all
+/// connections busy, acquire_timeout pending) returns 503 quickly rather
+/// than blocking the probe for the full 5-second pool acquire_timeout.
+/// A 503 here causes Kubernetes to stop routing traffic, which is the
+/// correct behaviour when the service cannot reach the database.
 pub async fn ready(State(state): State<ApiState>) -> impl IntoResponse {
-    match sqlx::query("SELECT 1").execute(state.store.pool()).await {
-        Ok(_) => (StatusCode::OK, Json(json!({ "status": "ready" }))),
-        Err(e) => (
+    let probe = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        sqlx::query("SELECT 1").execute(state.store.pool()),
+    )
+    .await;
+    match probe {
+        Ok(Ok(_)) => (StatusCode::OK, Json(json!({ "status": "ready" }))),
+        Ok(Err(e)) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "status": "unavailable", "error": e.to_string() })),
+        ),
+        Err(_elapsed) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "status": "unavailable", "error": "db pool acquire timed out (500ms)" })),
         ),
     }
 }

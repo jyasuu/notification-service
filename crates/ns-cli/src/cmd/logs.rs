@@ -128,6 +128,7 @@ pub async fn run(args: LogsArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<()
 }
 
 /// Map raw query columns into a [`LogRow`] for display.
+#[allow(clippy::too_many_arguments)]
 fn log_row(
     event_id: String,
     event_type: String,
