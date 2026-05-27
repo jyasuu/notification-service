@@ -59,8 +59,12 @@ use crate::{config::ConsumerConfig, delivery::handle_delivery, processor::Proces
 fn scrub_amqp_url(url: &str) -> String {
     // amqp[s]://user:pass@host:port/vhost  →  amqp[s]://[redacted]@host:port/vhost
     //
-    // Primary path: standard scheme + userinfo.
-    if let Some(at_pos) = url.find('@') {
+    // rfind('@') is used instead of find('@') so that a password containing a
+    // literal '@' (which should be percent-encoded but may not be in a
+    // misconfigured URL) does not cause us to match the wrong '@' and leak part
+    // of the credentials into the log.  The last '@' in an AMQP URL is always
+    // the userinfo / host separator.
+    if let Some(at_pos) = url.rfind('@') {
         if let Some(scheme_end) = url.find("://") {
             let scheme = &url[..scheme_end + 3]; // "amqp://" or "amqps://"
             let after_at = &url[at_pos + 1..];
@@ -284,6 +288,18 @@ mod scrub_url_tests {
         // must never leak credentials, even if the format is unrecognised.
         let result = scrub_amqp_url("amqp:user:secret@broker.example.com");
         assert!(!result.contains("secret"), "credentials leaked: {result}");
+    }
+
+    #[test]
+    fn redacts_password_containing_at_sign() {
+        // A password with a literal '@' (should be percent-encoded, but may not be).
+        // rfind('@') must match the host separator, not the one inside the password.
+        let result = scrub_amqp_url("amqp://user:p@ss@broker.example.com:5672");
+        assert!(!result.contains("p@ss"), "password leaked: {result}");
+        assert!(
+            result.contains("broker.example.com"),
+            "host should be visible: {result}"
+        );
     }
 }
 

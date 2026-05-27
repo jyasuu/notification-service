@@ -165,6 +165,31 @@ impl SendMode {
     }
 }
 
+impl GroupRetryMode {
+    /// Returns the lowercase string representation used in the database
+    /// `group_retry_mode` column.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GroupRetryMode::Whole => "whole",
+            GroupRetryMode::Individual => "individual",
+        }
+    }
+}
+
+impl TryFrom<&str> for GroupRetryMode {
+    type Error = crate::AppError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s {
+            "whole" => Ok(GroupRetryMode::Whole),
+            "individual" => Ok(GroupRetryMode::Individual),
+            other => Err(crate::AppError::UnknownStatus(format!(
+                "unknown group_retry_mode: {other}"
+            ))),
+        }
+    }
+}
+
 /// All email-specific options for a single event.
 ///
 /// One event can carry **multiple recipients** — the notification service

@@ -526,7 +526,17 @@ pub(crate) async fn process_one_group(
     let mut rl_count: u32 = 0;
 
     loop {
-        match process_group(ctx, event, email_opts, attachments, shutdown).await {
+        match process_group(
+            ctx,
+            event,
+            email_opts,
+            attachments,
+            &cc_bcc,
+            cfg.max_recipients_per_event,
+            shutdown,
+        )
+        .await
+        {
             RecipientOutcome::Sent | RecipientOutcome::Blocked(_) | RecipientOutcome::Skipped => {
                 return;
             }

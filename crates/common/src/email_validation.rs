@@ -171,16 +171,22 @@ mod tests {
     #[test]
     fn accepts_address_at_exactly_254_chars() {
         // Construct local@domain such that total length == 254 (the RFC limit).
-        // local part: 64 chars (max allowed), domain: "a.com" = 5 chars,
-        // plus "@" = 1 char → 64 + 1 + 5 = 70. Pad domain to reach 254 total.
-        // 254 - 1 - 64 = 189 chars for the domain.  Build as "<label>.example.com"
-        // where label is 183 chars so label + ".example.com" (12) = 195... let's
-        // just compute directly.
-        let local = "a".repeat(64); // 64
-        let domain_len = 254 - 1 - 64; // 189 chars for the domain portion
-                                       // domain: 182 'x' chars + ".com" = 186 chars... adjust to hit exactly 254
-        let label = "x".repeat(domain_len - ".com".len()); // 185 chars
-        let domain = format!("{label}.com");
+        //
+        // Constraints:
+        //   - local part: max 64 chars
+        //   - domain: max 253 chars, each label max 63 chars
+        //   - total (local + '@' + domain) == 254
+        //
+        // Use local = 64 'a's, then domain must be 254 - 1 - 64 = 189 chars.
+        // Build domain as three 63-char labels + one short label + ".com":
+        //   63 + 1 + 63 + 1 + 57 + 1 + 3 = 189  ✓  (all labels ≤ 63 chars)
+        let local = "a".repeat(64);
+        let domain = format!(
+            "{}.{}.{}.com",
+            "x".repeat(63),
+            "x".repeat(63),
+            "x".repeat(57),
+        );
         let addr = format!("{local}@{domain}");
         assert_eq!(
             addr.len(),

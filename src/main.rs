@@ -154,7 +154,9 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!(
                 account = name,
                 from_email = acct.from_email,
-                "Named sender account has empty username or password —                  this is only correct for no-auth SMTP relays (e.g. Mailpit).                  Set username and password in [sender_accounts.{name}] if auth is required."
+                "Named sender account has empty username or password — \
+                 this is only correct for no-auth SMTP relays (e.g. Mailpit). \
+                 Set username and password in [sender_accounts.{name}] if auth is required."
             );
         }
         let acct_sender = SmtpSender::new(mailer::smtp::SmtpConfig {
@@ -228,7 +230,7 @@ async fn main() -> anyhow::Result<()> {
     match &cfg.http.api_key {
         Some(_) => {}
         None if cfg.http.allow_unauthenticated => {
-            tracing::error!(
+            tracing::warn!(
                 "HTTP API authentication is DISABLED (allow_unauthenticated = true) — \
                  all /emails/* and /templates/* endpoints are publicly accessible. \
                  Do not use this setting in production."

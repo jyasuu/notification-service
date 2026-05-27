@@ -190,10 +190,15 @@ async fn republish_event(
     let group_retry_mode = detail
         .group_retry_mode
         .as_deref()
-        .map(|s| match s {
-            "individual" => common::GroupRetryMode::Individual,
-            _ => common::GroupRetryMode::Whole,
+        .map(|s| {
+            common::GroupRetryMode::try_from(s).map_err(|_| {
+                ApiError(AppError::permanent_mailer(format!(
+                    "unknown group_retry_mode value '{s}' in notification_log row — \
+                     fix the DB row before retrying"
+                )))
+            })
         })
+        .transpose()?
         .unwrap_or_default();
 
     // ── 8. Double-send warning for group+whole retries ────────────────────────
