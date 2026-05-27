@@ -1,0 +1,288 @@
+# anvil-notify.yaml
+# Deploys only the anvil-notify application components.
+# Assumes postgres, business-postgres, rabbitmq, and mailpit
+# are already running and reachable at their expected hostnames.
+#
+# Update the image: fields and AN__* env vars before applying.
+#
+# Apply:
+#   kubectl apply -f anvil-notify.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Namespace ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: anvil-notify
+  labels:
+    app.kubernetes.io/part-of: anvil-notify
+
+---
+# ── Secret — SMTP password (and optional API key) ─────────────────────────────
+# Replace values with:  echo -n 'yourvalue' | base64
+apiVersion: v1
+kind: Secret
+metadata:
+  name: anvil-notify-secret
+  namespace: anvil-notify
+  labels:
+    app.kubernetes.io/part-of: anvil-notify
+type: Opaque
+data:
+  # Empty for dev (Mailpit). Set a real base64-encoded password for production.
+  AN__MAILER__PASSWORD: ""
+
+---
+# ── ConfigMap — local.toml mounted into anvil-notify ─────────────────────────
+# Edit host names / ports to match your external services.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: anvil-notify-config
+  namespace: anvil-notify
+  labels:
+    app.kubernetes.io/part-of: anvil-notify
+data:
+  local.toml: |
+    [database]
+    url = "postgres://postgres:postgres@postgres:5432/anvil_notify"
+
+    [amqp]
+    url             = "amqp://guest:guest@rabbitmq:5672"
+    queue           = "email.requested"
+    exchange        = "anvil-notify"
+    routing_key     = "email.requested"
+    max_retries     = 3
+    retry_base_ms   = 1000
+    max_concurrency = 10
+
+    [http]
+    port = 8080
+    # api_key = "change-me"
+    metrics_port = 9091
+
+    [rate_limit]
+    emails_per_second = 10
+    burst_size        = 20
+
+    [filter]
+    blocked_emails  = []
+    blocked_domains = []
+
+    [mailer]
+    backend               = "smtp"
+    host                  = "mailpit"
+    port                  = 1025
+    username              = ""
+    password              = ""
+    from_email            = "no-reply@example.com"
+    from_name             = "AnvilNotify Dev"
+    tls_mode              = "none"
+    connection_timeout_ms = 2000
+    read_timeout_ms       = 5000
+    write_timeout_ms      = 5000
+    pool_size             = 2
+
+    [sender_accounts.mailpit]
+    host       = "mailpit"
+    port       = 1025
+    username   = ""
+    password   = ""
+    from_email = "mailpit-account@example.com"
+    from_name  = "AnvilNotify Dev (mailpit account)"
+    tls_mode   = "none"
+
+---
+# ── ConfigMap — env vars for anvil-notify ────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: anvil-notify-env
+  namespace: anvil-notify
+  labels:
+    app.kubernetes.io/part-of: anvil-notify
+data:
+  AN__HTTP__ALLOW_UNAUTHENTICATED: "true"
+  AN__DATABASE__URL: "postgres://postgres:postgres@postgres:5432/anvil_notify"
+  AN__AMQP__URL: "amqp://guest:guest@rabbitmq:5672"
+  RUST_LOG: "info"
+  LOG_FORMAT: "pretty"
+
+---
+# ── ConfigMap — env vars for outbox-worker ───────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: outbox-worker-env
+  namespace: anvil-notify
+  labels:
+    app.kubernetes.io/part-of: anvil-notify
+data:
+  AN__OUTBOX__DATABASE_URL: "postgres://postgres:postgres@business-postgres:5432/business"
+  AN__OUTBOX__AMQP_URL: "amqp://guest:guest@rabbitmq:5672"
+  AN__OUTBOX__EXCHANGE: "anvil-notify"
+  AN__OUTBOX__ROUTING_KEY: "email.requested"
+  AN__OUTBOX__POLL_INTERVAL_MS: "1000"
+  AN__OUTBOX__BATCH_SIZE: "50"
+  RUST_LOG: "info"
+  LOG_FORMAT: "pretty"
+
+---
+# ── Deployment — anvil-notify ─────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: anvil-notify
+  namespace: anvil-notify
+  labels:
+    app.kubernetes.io/name: anvil-notify
+    app.kubernetes.io/part-of: anvil-notify
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: anvil-notify
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: anvil-notify
+        app.kubernetes.io/part-of: anvil-notify
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 35
+      initContainers:
+        - name: wait-for-rabbitmq
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for rabbitmq:5672…"
+              until nc -z rabbitmq 5672; do sleep 3; done
+              echo "RabbitMQ ready."
+      containers:
+        - name: anvil-notify
+          image: anvil-notify:latest   # ← replace with your registry image
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9091
+          envFrom:
+            - configMapRef:
+                name: anvil-notify-env
+          env:
+            - name: AN__MAILER__PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: anvil-notify-secret
+                  key: AN__MAILER__PASSWORD
+                  optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /app/config/local.toml
+              subPath: local.toml
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 40
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: anvil-notify-config
+            items:
+              - key: local.toml
+                path: local.toml
+
+---
+# ── Service — anvil-notify ────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: anvil-notify
+  namespace: anvil-notify
+  labels:
+    app.kubernetes.io/name: anvil-notify
+    app.kubernetes.io/part-of: anvil-notify
+spec:
+  selector:
+    app.kubernetes.io/name: anvil-notify
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    - name: metrics
+      port: 9091
+      targetPort: 9091
+  type: ClusterIP
+
+---
+# ── Deployment — outbox-worker ────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: outbox-worker
+  namespace: anvil-notify
+  labels:
+    app.kubernetes.io/name: outbox-worker
+    app.kubernetes.io/part-of: anvil-notify
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: outbox-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: outbox-worker
+        app.kubernetes.io/part-of: anvil-notify
+    spec:
+      terminationGracePeriodSeconds: 35
+      initContainers:
+        - name: wait-for-rabbitmq
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for rabbitmq:5672…"
+              until nc -z rabbitmq 5672; do sleep 3; done
+              echo "RabbitMQ ready."
+      containers:
+        - name: outbox-worker
+          image: anvil-notify:latest   # ← same image as anvil-notify, different entrypoint
+          imagePullPolicy: IfNotPresent
+          command: ["outbox-worker"]
+          envFrom:
+            - configMapRef:
+                name: outbox-worker-env
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 300m
+              memory: 128Mi
