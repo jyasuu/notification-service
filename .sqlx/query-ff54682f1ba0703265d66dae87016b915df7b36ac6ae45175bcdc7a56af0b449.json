@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT n.recipient_id AS recipient_email, n.status,\n                  n.retry_count, n.last_error, n.updated_at\n           FROM notification_log n\n           WHERE n.event_id    = $1\n             AND n.channel     = 'email'\n             AND n.recipient_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "recipient_email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "retry_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "last_error",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "ff54682f1ba0703265d66dae87016b915df7b36ac6ae45175bcdc7a56af0b449"
+}

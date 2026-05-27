@@ -1,12 +1,14 @@
 //! `ns status` — show delivery status for an event from the notification DB.
 //!
-//! Queries notification_log directly; does not require the HTTP API to be running.
+//! Queries notification_log directly via the `store` crate; does not require
+//! the HTTP API to be running.
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
 use tabled::Tabled;
+
+use store::cli_queries;
 
 use crate::{
     cli::{OutputFormat, StatusArgs},
@@ -36,18 +38,7 @@ pub async fn run(args: StatusArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<
 
     if let Some(email) = &args.email {
         // Single recipient
-        let row = sqlx::query!(
-            r#"SELECT n.recipient_id AS recipient_email, n.status,
-                      n.retry_count, n.last_error, n.updated_at
-               FROM notification_log n
-               WHERE n.event_id    = $1
-                 AND n.channel     = 'email'
-                 AND n.recipient_id = $2"#,
-            args.event_id,
-            email,
-        )
-        .fetch_optional(&pool)
-        .await?;
+        let row = cli_queries::get_status_for_recipient(&pool, args.event_id, email).await?;
 
         match row {
             None => println!("No record found for {email} in event {}", args.event_id),
@@ -57,7 +48,7 @@ pub async fn run(args: StatusArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<
                     status: r.status,
                     retry_count: r.retry_count,
                     last_error: output::opt(&r.last_error),
-                    updated_at: fmt_ts(Some(r.updated_at)),
+                    updated_at: fmt_ts(r.updated_at),
                 }];
                 match fmt {
                     OutputFormat::Json => output::print_json(&rows),
@@ -67,17 +58,7 @@ pub async fn run(args: StatusArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<
         }
     } else {
         // All recipients for the event
-        let rows = sqlx::query!(
-            r#"SELECT n.recipient_id AS recipient_email, n.status,
-                      n.retry_count, n.last_error, n.updated_at
-               FROM notification_log n
-               WHERE n.event_id = $1
-                 AND n.channel  = 'email'
-               ORDER BY n.created_at"#,
-            args.event_id,
-        )
-        .fetch_all(&pool)
-        .await?;
+        let rows = cli_queries::get_status_for_event(&pool, args.event_id).await?;
 
         if rows.is_empty() {
             println!("No records found for event {}", args.event_id);
@@ -92,7 +73,9 @@ pub async fn run(args: StatusArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<
             let blocked = rows.iter().filter(|r| r.status == "BLOCKED").count();
             let pending = rows.iter().filter(|r| r.status == "PENDING").count();
             println!("Event: {}", args.event_id);
-            println!("Total: {total}  Sent: {sent}  Pending: {pending}  Failed: {failed}  Blocked: {blocked}");
+            println!(
+                "Total: {total}  Sent: {sent}  Pending: {pending}  Failed: {failed}  Blocked: {blocked}"
+            );
             println!();
         }
 
@@ -103,7 +86,7 @@ pub async fn run(args: StatusArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<
                 status: r.status,
                 retry_count: r.retry_count,
                 last_error: output::opt(&r.last_error),
-                updated_at: fmt_ts(Some(r.updated_at)),
+                updated_at: fmt_ts(r.updated_at),
             })
             .collect();
 
@@ -116,7 +99,6 @@ pub async fn run(args: StatusArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<
     Ok(())
 }
 
-fn fmt_ts(ts: Option<DateTime<Utc>>) -> String {
-    ts.map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-        .unwrap_or_else(|| "—".into())
+fn fmt_ts(ts: chrono::DateTime<chrono::Utc>) -> String {
+    ts.format("%Y-%m-%d %H:%M:%S UTC").to_string()
 }

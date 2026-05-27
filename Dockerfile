@@ -28,20 +28,10 @@ COPY . .
 
 RUN rustup target add x86_64-unknown-linux-musl
 ENV CC_x86_64_unknown_linux_musl=musl-gcc
-RUN cargo build --release  --target=x86_64-unknown-linux-musl --all
+RUN cargo build --release  --target=x86_64-unknown-linux-musl
 
 # ── Stage 4: runtime ──────────────────────────────────────────────────────────
-FROM debian:bookworm-slim AS runtime
-
-# curl is required by the docker-compose healthcheck
-# (test: curl -sf http://localhost:8080/ready || exit 1).
-# Without it the container is never marked healthy and dependent
-# services cannot start.
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    curl \
-    libssl3 \
-    && rm -rf /var/lib/apt/lists/*
+FROM alpine AS runtime
 
 WORKDIR /app
 
@@ -50,9 +40,6 @@ COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/outbox-worker 
 COPY --from=builder /app/migrations  ./migrations
 COPY --from=builder /app/config      ./config
 
-# Drop privileges
-RUN useradd -m -u 1001 appuser
-USER appuser
 
 EXPOSE 8080
 

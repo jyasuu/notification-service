@@ -35,8 +35,9 @@ indicatif   = "0.17"          # progress spinners
 # Config (re-use the same file format as the service)
 config = "0.14"
 
-# DB (for direct status/log queries)
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "macros"] }
+# DB — pool creation only; all sqlx::query! calls live in the store crate
+# so sqlx prepare only needs to run there.
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres"] }
 
 # Tracing (quieter than the service — only warnings by default)
 tracing            = { workspace = true }

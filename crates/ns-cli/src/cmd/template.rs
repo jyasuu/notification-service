@@ -1,7 +1,7 @@
 //! `ns template` — list, show, and flush notification templates.
 //!
-//! * `list` and `show` query the `notification_template` table directly (same as
-//!   `ns status` / `ns logs`) — they do not require the HTTP API to be running.
+//! * `list` and `show` query `notification_template` via the `store` crate —
+//!   they do not require the HTTP API to be running.
 //! * `flush` calls the HTTP API's DELETE cache endpoints, which do require a
 //!   running service.
 
@@ -10,6 +10,8 @@ use reqwest::Client;
 use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
 use tabled::Tabled;
+
+use store::cli_queries;
 
 use crate::{
     cli::{OutputFormat, TemplateAction, TemplateArgs},
@@ -43,13 +45,7 @@ pub async fn run(args: TemplateArgs, cfg: CliConfig, fmt: OutputFormat) -> Resul
                 .await
                 .context("Failed to connect to database")?;
 
-            let rows = sqlx::query!(
-                r#"SELECT type, channel, subject, version, active, updated_at
-                   FROM   notification_template
-                   ORDER  BY type, channel"#
-            )
-            .fetch_all(&pool)
-            .await?;
+            let rows = cli_queries::list_templates(&pool).await?;
 
             if rows.is_empty() {
                 println!("(no templates in database)");
@@ -59,7 +55,7 @@ pub async fn run(args: TemplateArgs, cfg: CliConfig, fmt: OutputFormat) -> Resul
             let display: Vec<TemplateRow> = rows
                 .into_iter()
                 .map(|r| TemplateRow {
-                    event_type: r.r#type,
+                    event_type: r.event_type,
                     channel: r.channel,
                     subject: output::truncate(&r.subject, 50),
                     version: r.version,
@@ -82,22 +78,14 @@ pub async fn run(args: TemplateArgs, cfg: CliConfig, fmt: OutputFormat) -> Resul
                 .await
                 .context("Failed to connect to database")?;
 
-            let rows = sqlx::query!(
-                r#"SELECT type, channel, subject, body_html, body_text, version, active, updated_at
-                   FROM   notification_template
-                   WHERE  type = $1
-                   ORDER  BY channel"#,
-                event_type,
-            )
-            .fetch_all(&pool)
-            .await?;
+            let rows = cli_queries::show_template(&pool, &event_type).await?;
 
             if rows.is_empty() {
                 bail!("No template found for event type '{event_type}'");
             }
 
             for r in rows {
-                println!("Type    : {}", r.r#type);
+                println!("Type    : {}", r.event_type);
                 println!("Channel : {}", r.channel);
                 println!("Version : {}  Active: {}", r.version, r.active);
                 println!("Updated : {}", r.updated_at.format("%Y-%m-%d %H:%M:%S UTC"));

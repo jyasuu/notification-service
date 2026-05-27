@@ -1,3 +1,4 @@
+pub mod cli_queries;
 pub mod notification_log;
 pub mod template_store;
 

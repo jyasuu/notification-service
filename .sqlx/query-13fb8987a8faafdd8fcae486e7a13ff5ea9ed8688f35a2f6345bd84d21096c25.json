@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT\n                n.id,\n                n.event_id,\n                n.event_type,\n                n.status,\n                n.retry_count,\n                n.total_attempts,\n                n.last_error,\n                n.payload,\n                n.event_timestamp,\n                n.created_at,\n                n.updated_at,\n                e.recipient_email,\n                e.recipient_name,\n                e.from_override,\n                e.sender_account,\n                e.send_mode,\n                e.group_retry_mode,\n                e.cc,\n                e.bcc,\n                e.attachments\n            FROM notification_log n\n            JOIN email_notification_log e ON e.notification_id = n.id\n            WHERE n.event_id = $1\n              AND n.channel  = $2\n            ORDER BY n.created_at\n            ",
+  "query": "\n            SELECT\n                n.id,\n                n.event_id,\n                n.event_type,\n                n.status,\n                n.retry_count,\n                n.total_attempts,\n                n.last_error,\n                n.payload,\n                n.event_timestamp,\n                n.created_at,\n                n.updated_at,\n                e.recipient_email,\n                e.recipient_name,\n                e.from_override,\n                e.sender_account,\n                e.send_mode,\n                e.group_retry_mode,\n                e.cc,\n                e.bcc,\n                e.attachments\n            FROM notification_log n\n            JOIN email_notification_log e ON e.notification_id = n.id\n            WHERE n.event_id = $1\n              AND n.channel  = $2\n            ORDER BY n.created_at\n            -- Safety cap: prevents a single pathological event with thousands of\n            -- recipients from loading the full result set into the API pod's memory.\n            -- 500 rows is well above any legitimate multi-recipient event; a bulk\n            -- campaign accidentally routed here would otherwise cause an OOM.\n            LIMIT 500\n            ",
   "describe": {
     "columns": [
       {
@@ -133,5 +133,5 @@
       true
     ]
   },
-  "hash": "5bc28016c065e965c6a88f331bcf93c42ab9902db069c0967611b9c80377442c"
+  "hash": "13fb8987a8faafdd8fcae486e7a13ff5ea9ed8688f35a2f6345bd84d21096c25"
 }

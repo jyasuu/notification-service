@@ -9,6 +9,8 @@ use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
 use tabled::Tabled;
 
+use store::cli_queries;
+
 use crate::{
     cli::{OutboxArgs, OutputFormat},
     config::CliConfig,
@@ -47,17 +49,7 @@ pub async fn run(args: OutboxArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<
         .connect(&db_url)
         .await?;
 
-    let rows = sqlx::query!(
-        r#"SELECT event_id, event_type, status, fail_count, payload, created_at, published_at
-           FROM   outbox
-           WHERE  status = $1
-           ORDER  BY created_at DESC
-           LIMIT  $2"#,
-        args.status.as_sql_str(),
-        args.limit,
-    )
-    .fetch_all(&pool)
-    .await?;
+    let rows = cli_queries::list_outbox_rows(&pool, args.status.as_sql_str(), args.limit).await?;
 
     if rows.is_empty() {
         println!("(no {} outbox rows)", args.status.as_sql_str());
@@ -71,7 +63,7 @@ pub async fn run(args: OutboxArgs, cfg: CliConfig, fmt: OutputFormat) -> Result<
         .map(|r| {
             let payload_str = r.payload.to_string();
             OutboxRow {
-                event_id: r.event_id.to_string(),
+                event_id: r.event_id,
                 event_type: r.event_type,
                 status: r.status,
                 fail_count: r.fail_count,

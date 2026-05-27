@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                n.event_type,\n                n.payload,\n                n.event_timestamp,\n                n.created_at,\n                e.from_override,\n                e.sender_account,\n                e.send_mode,\n                e.group_retry_mode,\n                e.attachments,\n                e.cc,\n                e.bcc\n            FROM notification_log n\n            JOIN email_notification_log e ON e.notification_id = n.id\n            WHERE n.event_id = $1\n              AND n.channel  = $2\n            ORDER BY n.created_at\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "payload",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 2,
+        "name": "event_timestamp",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "from_override",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 5,
+        "name": "sender_account",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "send_mode",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "group_retry_mode",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "attachments",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 9,
+        "name": "cc",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 10,
+        "name": "bcc",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "ebe667942e27a2e3bacdeb085f8de42a3f1997129001c96d7a609144496e2aac"
+}
