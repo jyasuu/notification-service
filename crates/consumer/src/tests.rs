@@ -17,7 +17,7 @@
 
 #[cfg(test)]
 mod processor_tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     use async_trait::async_trait;
     use chrono::Utc;
@@ -34,17 +34,11 @@ mod processor_tests {
 
     /// A sender that pops from a pre-configured queue of `Result`s.
     /// Panics when the queue is exhausted (unexpected extra call).
+    #[allow(dead_code)]
     struct MockSender {
         outcomes: Mutex<Vec<Result<(), AppError>>>,
     }
 
-    impl MockSender {
-        fn new(outcomes: Vec<Result<(), AppError>>) -> Arc<Self> {
-            Arc::new(Self {
-                outcomes: Mutex::new(outcomes),
-            })
-        }
-    }
 
     #[async_trait]
     impl EmailSender for MockSender {
