@@ -1,19 +1,19 @@
-/// Integration tests for the consumer processor retry logic.
-///
-/// These tests exercise `process_recipient` and `process_one_recipient`
-/// (via the `ProcessorContext`) using:
-///   - A `MockSender` that returns a configurable sequence of outcomes.
-///   - Stub `EmailNotificationStore` / `TemplateStore` backed by a real Postgres
-///     instance only in CI; locally the tests that need DB are gated behind
-///     `#[cfg(feature = "integration")]`.  The pure-logic tests (retry
-///     counting, permanent-vs-transient branching, rate-limit cap) use
-///     the mock store defined below and run everywhere (`cargo test`).
-///
-/// Run all tests (including DB-backed ones):
-///   cargo test -p consumer --features integration
-///
-/// Run pure-unit tests only (no Postgres needed):
-///   cargo test -p consumer
+//! Integration tests for the consumer processor retry logic.
+//!
+//! These tests exercise `process_recipient` and `process_one_recipient`
+//! (via the `ProcessorContext`) using:
+//!   - A `MockSender` that returns a configurable sequence of outcomes.
+//!   - Stub `EmailNotificationStore` / `TemplateStore` backed by a real Postgres
+//!     instance only in CI; locally the tests that need DB are gated behind
+//!     `#[cfg(feature = "integration")]`.  The pure-logic tests (retry
+//!     counting, permanent-vs-transient branching, rate-limit cap) use
+//!     the mock store defined below and run everywhere (`cargo test`).
+//!
+//! Run all tests (including DB-backed ones):
+//!   cargo test -p consumer --features integration
+//!
+//! Run pure-unit tests only (no Postgres needed):
+//!   cargo test -p consumer
 
 #[cfg(test)]
 mod processor_tests {
@@ -23,16 +23,14 @@ mod processor_tests {
     use chrono::Utc;
     use common::{AppError, ChannelOverrides, EmailOptions, NotificationEvent, Recipient};
     use mailer::{EmailMessage, EmailSender};
-    use rate_limiter::{MailRateLimiter, RateLimitConfig};
+
     use recipient_filter::{FilterConfig, RecipientFilter};
     use serde_json::json;
 
     use uuid::Uuid;
 
     use crate::config::ConsumerConfig;
-    use crate::processor::{is_retryable, ProcessorContext};
-
-    // ── Mock sender ───────────────────────────────────────────────────────────
+    use crate::processor::is_retryable;
 
     /// A sender that pops from a pre-configured queue of `Result`s.
     /// Panics when the queue is exhausted (unexpected extra call).
@@ -62,66 +60,7 @@ mod processor_tests {
         }
     }
 
-    fn mock_sender(mut outcomes: Vec<Result<(), AppError>>) -> Arc<dyn EmailSender> {
-        // Reverse so pop() returns elements in the original order.
-        outcomes.reverse();
-        MockSender::new(outcomes)
-    }
-
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    fn ok() -> Result<(), AppError> {
-        Ok(())
-    }
-
-    fn transient() -> Result<(), AppError> {
-        Err(AppError::transient_mailer("transient network error"))
-    }
-
-    fn permanent() -> Result<(), AppError> {
-        Err(AppError::permanent_mailer("bad address"))
-    }
-
-    fn rate_limited() -> Result<(), AppError> {
-        Err(AppError::RateLimited("429 from mail server".into()))
-    }
-
-    fn make_event(recipient_email: &str) -> NotificationEvent {
-        NotificationEvent {
-            event_id: Uuid::new_v4(),
-            timestamp: Utc::now(),
-            event_type: "ORDER_CONFIRMATION".into(),
-            payload: json!({ "orderId": "42", "amount": "9.99", "name": "Test User" }),
-            metadata: Default::default(),
-            channel_overrides: ChannelOverrides {
-                email: Some(EmailOptions {
-                    recipients: vec![Recipient {
-                        email: recipient_email.into(),
-                        name: Some("Test User".into()),
-                    }],
-                    cc: vec![],
-                    bcc: vec![],
-                    from_override: None,
-                    attachments: vec![],
-                    sender_account: None,
-                    send_mode: common::SendMode::Individual,
-                    group_retry_mode: common::GroupRetryMode::Individual,
-                    retry_policy: common::RetryPolicy::Retry,
-                }),
-            },
-        }
-    }
-
-    fn passthrough_filter() -> RecipientFilter {
-        RecipientFilter::new(FilterConfig::default())
-    }
-
-    fn disabled_rate_limiter() -> MailRateLimiter {
-        MailRateLimiter::new(RateLimitConfig {
-            emails_per_second: 0,
-            burst_size: 1,
-        })
-    }
 
     // ── is_retryable unit tests ────────────────────────────────────────────────
 
@@ -166,22 +105,6 @@ mod processor_tests {
     //
     // For these tests we verify the *outcome* returned by process_recipient,
     // which is what the runner acts on.
-
-    fn make_ctx(sender: Arc<dyn EmailSender>) -> ProcessorContext {
-        // We can't build a real EmailNotificationStore without a DB connection, so these
-        // tests focus on the path-branching that can be verified without DB I/O.
-        // See the `integration` feature section below for DB-backed tests.
-        //
-        // The ProcessorContext is constructed directly with a real (disabled)
-        // rate limiter and passthrough filter; the store and template_store fields
-        // are intentionally not exercised here.
-        //
-        // Suppress the "unused" warning — ProcessorContext requires all fields.
-        let _ = sender;
-        unimplemented!(
-            "Use make_ctx_with_db for DB-backed tests or test process_recipient components individually"
-        )
-    }
 
     // ── Pure-logic tests that don't need a DB ─────────────────────────────────
 
