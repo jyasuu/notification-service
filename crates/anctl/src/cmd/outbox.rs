@@ -1,4 +1,4 @@
-//! `ns outbox` — inspect the business-service outbox table.
+//! `anctl outbox` — inspect the business-service outbox table.
 //!
 //! Requires `outbox_database_url` to be configured (same setting that
 //! enables the built-in outbox worker).

@@ -1,4 +1,4 @@
-//! `ns retry` — reset FAILED recipients and re-enqueue via the HTTP API.
+//! `anctl retry` — reset FAILED recipients and re-enqueue via the HTTP API.
 //!
 //! Uses the service's HTTP retry endpoints so the event is faithfully
 //! reconstructed from stored DB data (payload, from_override, attachments).

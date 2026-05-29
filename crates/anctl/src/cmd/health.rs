@@ -1,4 +1,4 @@
-//! `ns health` — check service health and readiness via the HTTP API.
+//! `anctl health` — check service health and readiness via the HTTP API.
 
 use anyhow::Result;
 

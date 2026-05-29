@@ -1,4 +1,4 @@
-//! `ns status` — show delivery status for an event from the notification DB.
+//! `anctl status` — show delivery status for an event from the notification DB.
 //!
 //! Queries notification_log directly via the `store` crate; does not require
 //! the HTTP API to be running.

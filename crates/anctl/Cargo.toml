@@ -1,10 +1,10 @@
 [package]
-name    = "ns-cli"
+name    = "anctl"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "ns"
+name = "anctl"
 path = "src/main.rs"
 
 [dependencies]

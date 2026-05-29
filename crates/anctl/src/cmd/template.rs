@@ -1,4 +1,4 @@
-//! `ns template` — list, show, and flush notification templates.
+//! `anctl template` — list, show, and flush notification templates.
 //!
 //! * `list` and `show` query `notification_template` via the `store` crate —
 //!   they do not require the HTTP API to be running.

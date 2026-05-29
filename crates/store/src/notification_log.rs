@@ -182,6 +182,19 @@ pub trait NotificationStore: Send + Sync + 'static {
     /// Fetch all delivery rows for an event (one per recipient).
     async fn get_by_event_id(&self, event_id: Uuid) -> Result<Vec<NotificationLog>, AppError>;
 
+    /// Fetch delivery rows for an event, optionally filtered to a subset of
+    /// recipient addresses.
+    ///
+    /// When `only_emails` is `Some`, only rows whose `recipient_id` is in the
+    /// set are returned — avoids loading every row for the event when only a
+    /// single recipient is being retried.  Pass `None` to return all rows
+    /// (equivalent to `get_by_event_id`).
+    async fn get_recipients_for_event(
+        &self,
+        event_id: Uuid,
+        only_emails: Option<&[String]>,
+    ) -> Result<Vec<NotificationLog>, AppError>;
+
     /// Fetch the row for a single recipient within an event.
     async fn get_by_event_and_recipient(
         &self,
@@ -612,6 +625,95 @@ impl NotificationStore for EmailNotificationStore {
                 })
             })
             .collect()
+    }
+
+    #[instrument(skip(self, only_emails))]
+    async fn get_recipients_for_event(
+        &self,
+        event_id: Uuid,
+        only_emails: Option<&[String]>,
+    ) -> Result<Vec<NotificationLog>, AppError> {
+        // When a filter is provided, do a targeted query so we don't load
+        // every recipient row for the event (high-cardinality events can have
+        // hundreds of rows, but a single-recipient retry only needs one).
+        // The ANY($3) clause is safe: sqlx encodes &[String] as a Postgres text[].
+        match only_emails {
+            Some(emails) if !emails.is_empty() => {
+                let rows = sqlx::query!(
+                    r#"
+                    SELECT
+                        n.id,
+                        n.event_id,
+                        n.event_type,
+                        n.status,
+                        n.retry_count,
+                        n.total_attempts,
+                        n.last_error,
+                        n.payload,
+                        n.event_timestamp,
+                        n.created_at,
+                        n.updated_at,
+                        COALESCE(e.recipient_email, n.recipient_id) AS "recipient_email!",
+                        e.recipient_name,
+                        e.from_override,
+                        e.sender_account,
+                        e.send_mode,
+                        e.group_retry_mode,
+                        e.cc,
+                        e.bcc,
+                        e.attachments,
+                        e.to_recipients
+                    FROM notification_log n
+                    LEFT JOIN email_notification_log e ON e.notification_id = n.id
+                    WHERE n.event_id = $1
+                      AND n.channel  = $2
+                      AND COALESCE(e.recipient_email, n.recipient_id) = ANY($3)
+                    ORDER BY n.created_at
+                    LIMIT 500
+                    "#,
+                    event_id,
+                    CHANNEL_EMAIL,
+                    emails as &[String],
+                )
+                .fetch_all(&self.pool)
+                .await?;
+
+                if rows.is_empty() {
+                    return Err(AppError::NotFound(event_id.to_string()));
+                }
+
+                rows.into_iter()
+                    .map(|r| {
+                        Ok(NotificationLog {
+                            id: r.id,
+                            event_id: r.event_id,
+                            event_type: r.event_type,
+                            channel: CHANNEL_EMAIL.to_owned(),
+                            recipient_email: r.recipient_email,
+                            recipient_name: r.recipient_name,
+                            status: NotificationStatus::try_from(r.status.as_str())?,
+                            retry_count: r.retry_count,
+                            total_attempts: r.total_attempts,
+                            last_error: r.last_error,
+                            payload: Some(r.payload),
+                            from_override: r.from_override,
+                            attachments: r.attachments,
+                            sender_account: r.sender_account,
+                            cc: r.cc,
+                            bcc: r.bcc,
+                            send_mode: r.send_mode,
+                            group_retry_mode: r.group_retry_mode,
+                            to_recipients: r.to_recipients,
+                            event_timestamp: Some(r.event_timestamp),
+                            created_at: r.created_at,
+                            updated_at: r.updated_at,
+                        })
+                    })
+                    .collect()
+            }
+            // No filter — delegate to get_by_event_id to avoid duplicating the query.
+            _ => self.get_by_event_id(event_id).await,
+        }
     }
 
     #[instrument(skip(self))]

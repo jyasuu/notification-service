@@ -1,17 +1,17 @@
-//! `ns blocklist` — manage the runtime block/allow-list via the HTTP API.
+//! `anctl blocklist` — manage the runtime block/allow-list via the HTTP API.
 //!
 //! All sub-commands call the `/admin/blocklist` endpoints, so the service
 //! must be running and the CLI must be configured with a valid `http.api_key`.
 //!
 //! ```
-//! ns blocklist list
-//! ns blocklist add  --kind blocked_email  --value spam@example.com  [--reason "opt-out"]
-//! ns blocklist add  --kind blocked_domain --value example.com
-//! ns blocklist add  --kind allowed_email  --value vip@partner.com
-//! ns blocklist add  --kind allowed_domain --value trusted.org
-//! ns blocklist remove <id>
-//! ns blocklist flush          # evict cache (lazy reload on next check)
-//! ns blocklist reload         # evict + eagerly reload cache from DB
+//! anctl blocklist list
+//! anctl blocklist add  --kind blocked_email  --value spam@example.com  [--reason "opt-out"]
+//! anctl blocklist add  --kind blocked_domain --value example.com
+//! anctl blocklist add  --kind allowed_email  --value vip@partner.com
+//! anctl blocklist add  --kind allowed_domain --value trusted.org
+//! anctl blocklist remove <id>
+//! anctl blocklist flush          # evict cache (lazy reload on next check)
+//! anctl blocklist reload         # evict + eagerly reload cache from DB
 //! ```
 
 use anyhow::{bail, Context, Result};

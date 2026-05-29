@@ -153,11 +153,9 @@ pub async fn process_recipient(
             if let Err(ref e) = tr {
                 tracing::warn!(component = "body_text", error = %e, "Template render failed");
             }
-            let first_err = sr
-                .err()
-                .or(hr.err())
-                .or(tr.err())
-                .expect("at least one Err");
+            let first_err = sr.err().or(hr.err()).or(tr.err()).unwrap_or_else(|| {
+                unreachable!("match arm requires at least one Err among (sr, hr, tr)")
+            });
             return RecipientOutcome::Failed(first_err);
         }
     };
@@ -443,11 +441,9 @@ pub async fn process_group(
             if let Err(ref e) = tr {
                 tracing::warn!(component = "body_text", error = %e, "Template render failed");
             }
-            let first_err = sr
-                .err()
-                .or(hr.err())
-                .or(tr.err())
-                .expect("at least one Err");
+            let first_err = sr.err().or(hr.err()).or(tr.err()).unwrap_or_else(|| {
+                unreachable!("match arm requires at least one Err among (sr, hr, tr)")
+            });
             return RecipientOutcome::Failed(first_err);
         }
     };

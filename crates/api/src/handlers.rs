@@ -45,7 +45,12 @@ async fn republish_event(
     only_emails: Option<&[String]>,
 ) -> Result<(), ApiError> {
     // ── 1. Fetch per-recipient rows (for recipient list reconstruction) ───────
-    let logs = state.store.get_by_event_id(event_id).await?;
+    // Use the targeted query when only_emails is provided so single-recipient
+    // retries don't load every row for the event.
+    let logs = state
+        .store
+        .get_recipients_for_event(event_id, only_emails)
+        .await?;
 
     // ── 2. Fetch the authoritative event-level detail (single source of truth) ─
     //

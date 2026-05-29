@@ -136,7 +136,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{is_valid_email, AppError, NotificationEvent, Recipient, RetryPolicy, SendMode};
+use common::{
+    is_valid_email, AppError, GroupRetryMode, NotificationEvent, Recipient, RetryPolicy, SendMode,
+};
 use lapin::{message::Delivery, options::*};
 use mailer::fetch_attachments_with_limit;
 use mailer::message::ResolvedAttachment;
@@ -438,6 +440,22 @@ pub(crate) async fn handle_delivery(
 
     // ── Dispatch: group send or per-recipient individual sends ───────────────
     if email_opts.send_mode == SendMode::Group {
+        // Warn when group_retry_mode = Whole (the default): if any recipient's
+        // SMTP delivery succeeds in a partial attempt before the send fails,
+        // that recipient will receive the email twice on retry.
+        // Use group_retry_mode = Individual to avoid this — it writes one log
+        // row per recipient so already-SENT addresses are skipped on retry.
+        if email_opts.group_retry_mode == GroupRetryMode::Whole {
+            warn!(
+                event_id   = %event.event_id,
+                event_type = %event.event_type,
+                recipients = email_opts.recipients.len(),
+                "Group send with group_retry_mode=whole: if this send partially \
+                 succeeds and is retried, recipients who already received the \
+                 email may receive it again. Consider setting \
+                 group_retry_mode=individual to avoid double-sends on retry."
+            );
+        }
         process_one_group(
             &ctx,
             &event,

@@ -15,7 +15,7 @@ pub enum OutputFormat {
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "ns",
+    name = "anctl",
     about = "anvil-notify operations CLI",
     version,
     propagate_version = true
@@ -120,7 +120,7 @@ pub struct SendArgs {
     pub attachment: Vec<String>,
 
     /// Source metadata tag (stored as metadata.source in the event).
-    #[arg(long, default_value = "ns-cli")]
+    #[arg(long, default_value = "anctl")]
     pub source: String,
 
     /// Provide a specific event UUID (for idempotency). Auto-generated when omitted.
@@ -210,7 +210,7 @@ pub struct LogsArgs {
 
 // ── outbox ────────────────────────────────────────────────────────────────────
 
-/// Valid outbox row statuses accepted by `ns outbox --status`.
+/// Valid outbox row statuses accepted by `anctl outbox --status`.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 pub enum OutboxStatus {
     /// Waiting to be published to RabbitMQ (the common operator view).

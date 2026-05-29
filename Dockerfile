@@ -37,6 +37,7 @@ WORKDIR /app
 
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/anvil-notify /usr/bin/
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/outbox-worker /usr/bin/
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/anctl /usr/bin/
 COPY --from=builder /app/migrations  ./migrations
 COPY --from=builder /app/config      ./config
 

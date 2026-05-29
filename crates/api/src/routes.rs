@@ -6,7 +6,9 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use hmac::{Hmac, Mac};
 use serde_json::json;
+use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tower_http::trace::TraceLayer;
 
@@ -94,13 +96,32 @@ async fn bearer_auth(State(state): State<ApiState>, request: Request, next: Next
             Json(json!({ "error": "Authorization header missing or malformed" })),
         )
             .into_response(),
-        // Constant-time comparison prevents timing attacks on the token.
-        // `ConstantTimeEq::ct_eq` returns `subtle::Choice` (1 = equal).
-        Some(t) if t.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() == 0 => (
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "Invalid API key" })),
-        )
-            .into_response(),
-        Some(_) => next.run(request).await,
+        // Constant-time comparison using HMAC digests of both tokens so that
+        // the compared byte slices are always equal length (32 bytes), preventing
+        // a timing side-channel that would otherwise allow an attacker to
+        // determine the correct token length.
+        //
+        // Both values are HMAC-SHA256'd under the same key (the expected token
+        // itself) before comparison.  The key does not need to be secret for
+        // this purpose — we only need the digests to be fixed-length and for
+        // the comparison to be constant-time.  Using the expected token as the
+        // key ensures the digest depends on both sides, which prevents
+        // pre-computation attacks.
+        Some(t) => {
+            let mac_of = |input: &str| -> [u8; 32] {
+                let mut mac = Hmac::<Sha256>::new_from_slice(expected.as_bytes())
+                    .expect("HMAC accepts any key length");
+                mac.update(input.as_bytes());
+                mac.finalize().into_bytes().into()
+            };
+            if mac_of(t).ct_eq(&mac_of(expected)).unwrap_u8() == 0 {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": "Invalid API key" })),
+                )
+                    .into_response();
+            }
+            next.run(request).await
+        }
     }
 }

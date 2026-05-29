@@ -164,7 +164,16 @@ async fn connect_and_consume(
                     None => { warn!("Consumer stream ended"); return Err(anyhow::anyhow!("stream closed")); }
                 };
 
-                let permit = Arc::clone(&semaphore).acquire_owned().await.expect("semaphore closed");
+                let permit = match Arc::clone(&semaphore).acquire_owned().await {
+                    Ok(p) => p,
+                    // The semaphore is never explicitly closed in normal operation,
+                    // but if it is (e.g. during an unexpected shutdown path) we
+                    // treat it as a clean exit rather than panicking the task.
+                    Err(_) => {
+                        warn!("Semaphore closed — exiting consumer loop");
+                        return Ok(());
+                    }
+                };
                 let ctx    = ctx.clone();
                 let cfg    = cfg.clone();
                 let http   = Arc::clone(&http);

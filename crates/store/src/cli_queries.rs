@@ -1,9 +1,9 @@
-//! Read-only query helpers used exclusively by the `ns-cli` binary.
+//! Read-only query helpers used exclusively by the `anctl` binary.
 //!
 //! These functions encapsulate the `sqlx::query!` call sites that previously
-//! lived in `ns-cli/src/cmd/{logs,status,template}.rs`.  Moving them here
+//! lived in `anctl/src/cmd/{logs,status,template}.rs`.  Moving them here
 //! means `cargo sqlx prepare` only needs to run in one place (the `store`
-//! crate) and `ns-cli` no longer carries a direct `sqlx` dependency.
+//! crate) and `anctl` no longer carries a direct `sqlx` dependency.
 //!
 //! All functions accept a `&PgPool` so callers remain in control of how the
 //! pool is created and torn down.

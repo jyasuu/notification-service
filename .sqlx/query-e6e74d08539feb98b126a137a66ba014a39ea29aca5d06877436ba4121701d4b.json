@@ -1,0 +1,144 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    SELECT\n                        n.id,\n                        n.event_id,\n                        n.event_type,\n                        n.status,\n                        n.retry_count,\n                        n.total_attempts,\n                        n.last_error,\n                        n.payload,\n                        n.event_timestamp,\n                        n.created_at,\n                        n.updated_at,\n                        COALESCE(e.recipient_email, n.recipient_id) AS \"recipient_email!\",\n                        e.recipient_name,\n                        e.from_override,\n                        e.sender_account,\n                        e.send_mode,\n                        e.group_retry_mode,\n                        e.cc,\n                        e.bcc,\n                        e.attachments,\n                        e.to_recipients\n                    FROM notification_log n\n                    LEFT JOIN email_notification_log e ON e.notification_id = n.id\n                    WHERE n.event_id = $1\n                      AND n.channel  = $2\n                      AND COALESCE(e.recipient_email, n.recipient_id) = ANY($3)\n                    ORDER BY n.created_at\n                    LIMIT 500\n                    ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "event_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "event_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "retry_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "total_attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "last_error",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "payload",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 8,
+        "name": "event_timestamp",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "recipient_email!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "recipient_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "from_override",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 14,
+        "name": "sender_account",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "send_mode",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 16,
+        "name": "group_retry_mode",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 17,
+        "name": "cc",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 18,
+        "name": "bcc",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 19,
+        "name": "attachments",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 20,
+        "name": "to_recipients",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      null,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "e6e74d08539feb98b126a137a66ba014a39ea29aca5d06877436ba4121701d4b"
+}

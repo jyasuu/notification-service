@@ -11,7 +11,7 @@ pub struct CliConfig {
     pub database: DatabaseConfig,
     pub amqp: AmqpConfig,
     pub http: HttpConfig,
-    /// Outbox DB URL — only needed for `ns outbox`.
+    /// Outbox DB URL — only needed for `anctl outbox`.
     pub outbox_database_url: Option<String>,
     /// Base URL of the running anvil-notify HTTP API.
     /// Defaults to `http://localhost:<http.port>`.
@@ -70,7 +70,7 @@ pub fn load(path: Option<&str>) -> Result<CliConfig> {
     }
 
     let cfg = builder
-        .add_source(config::Environment::with_prefix("NS").separator("__"))
+        .add_source(config::Environment::with_prefix("AN").separator("__"))
         .build()
         .context("Failed to load config")?
         .try_deserialize::<CliConfig>()

@@ -5,6 +5,7 @@ WORKDIR /app
 
 COPY ./target/x86_64-unknown-linux-musl/release/anvil-notify /usr/bin/
 COPY ./target/x86_64-unknown-linux-musl/release/outbox-worker /usr/bin/
+COPY ./target/x86_64-unknown-linux-musl/release/anctl /usr/bin/
 COPY ./migrations  ./migrations
 COPY ./config      ./config
 

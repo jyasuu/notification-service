@@ -240,6 +240,6 @@ pub async fn run(args: SendArgs, cfg: CliConfig) -> Result<()> {
         .context("Publisher confirm failed")?;
 
     println!("✓ Published event {event_id}");
-    println!("  Run `ns status {event_id}` to track delivery.");
+    println!("  Run `anctl status {event_id}` to track delivery.");
     Ok(())
 }

@@ -1,4 +1,4 @@
-//! `ns logs` — list recent notification_log rows with optional filters.
+//! `anctl logs` — list recent notification_log rows with optional filters.
 //!
 //! Queries the notification DB directly via the `store` crate; does not
 //! require the HTTP API to be running.

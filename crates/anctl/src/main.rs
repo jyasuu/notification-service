@@ -1,4 +1,4 @@
-//! ns — anvil-notify CLI
+//! anctl — anvil-notify CLI
 //!
 //! A full operations tool for the anvil-notify.
 //! Connects directly to RabbitMQ and PostgreSQL (same config as the service)
@@ -7,20 +7,20 @@
 //! # Quick reference
 //!
 //! ```
-//! ns send    --type ORDER_CONFIRMATION --to alice@example.com [OPTIONS]
-//! ns status  <event-id>
-//! ns retry   <event-id> [--email alice@example.com]
-//! ns logs    [--status FAILED] [--limit 50]
-//! ns outbox  [--status PENDING] [--limit 50]
-//! ns blocklist list
-//! ns blocklist add  --kind blocked_email --value spam@example.com [--reason "opt-out"]
-//! ns blocklist remove <id>
-//! ns blocklist flush
-//! ns blocklist reload
-//! ns template list
-//! ns template show  <event-type>
-//! ns template flush [<event-type>]
-//! ns health
+//! anctl send    --type ORDER_CONFIRMATION --to alice@example.com [OPTIONS]
+//! anctl status  <event-id>
+//! anctl retry   <event-id> [--email alice@example.com]
+//! anctl logs    [--status FAILED] [--limit 50]
+//! anctl outbox  [--status PENDING] [--limit 50]
+//! anctl blocklist list
+//! anctl blocklist add  --kind blocked_email --value spam@example.com [--reason "opt-out"]
+//! anctl blocklist remove <id>
+//! anctl blocklist flush
+//! anctl blocklist reload
+//! anctl template list
+//! anctl template show  <event-type>
+//! anctl template flush [<event-type>]
+//! anctl health
 //! ```
 
 mod cli;
