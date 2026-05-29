@@ -1,99 +1,136 @@
 //! Per-delivery handler and per-recipient / per-group retry loops.
 //!
-//! This module owns everything that happens after a single AMQP `Delivery`
+//! This module owns everything that happens after a single AMQP [`Delivery`]
 //! is pulled off the wire:
 //!
-//! 1. **Deserialise** — decode the raw bytes into a `NotificationEvent`,
+//! 1. **Deserialise** — decode the raw bytes into a [`NotificationEvent`],
 //!    falling back to the legacy `EmailEvent` shape for older publishers.
 //! 2. **Validate** — check for an email channel, non-empty recipients, and
 //!    the configured `max_recipients_per_event` ceiling.
 //! 3. **Fetch attachments** — resolve pre-signed URLs once for the whole event.
-//! 4. **Dispatch** — for each recipient, spawn a task and run
-//!    `process_one_recipient`; for group sends, run `process_one_group`.
-//! 5. **ACK / NACK** — ACK once all recipient tasks finish; NACK to DLQ on
+//! 4. **Filter CC / BCC** — validate and block-list-check copy addresses once
+//!    per event (TO recipients are filtered later, per-recipient, in
+//!    `process_recipient` steps 5–6).
+//! 5. **Dispatch** — for each recipient spawn a task and run
+//!    [`process_one_recipient`]; for group sends run [`process_one_group`].
+//! 6. **ACK / NACK** — ACK once all recipient tasks finish; NACK to DLQ on
 //!    unrecoverable event-level failures (bad JSON, expired attachments).
 //!
 //! The connection loop and AMQP topology setup live in `runner.rs`; the
 //! per-recipient processor logic (idempotency, template rendering, send) lives
 //! in `processor.rs`.  This module is the glue between them.
 //!
-//! # Mail delivery flow
+//! ## TO vs CC/BCC filtering asymmetry
+//!
+//! CC/BCC addresses are validated and block-list-checked **once per event**
+//! inside `handle_delivery` before any tasks are spawned.  A blocked copy
+//! address is excluded with a WARN log; delivery to TO recipients continues
+//! unaffected.
+//!
+//! TO recipients receive **no event-level filter**.  Their address validation
+//! (step 0) and block-list checks (steps 5–6) run inside `process_recipient`,
+//! *after* the idempotency INSERT.  A blocked TO address therefore consumes a
+//! DB row and a task slot before being excluded.  This is intentional: the
+//! idempotency row lets operators observe the blocked delivery via the status
+//! API and keeps the retry-API path consistent for all recipient types.
+//!
+//! ## Mail delivery flow
 //!
 //! ```text
 //! AMQP broker
 //!  │
 //!  │  Delivery (raw bytes)
 //!  ▼
-//! ┌─────────────────────────────────────────────────────────────────┐
-//! │ handle_delivery                                                 │
-//! │                                                                 │
-//! │  1. Deserialise ──────────────────────────────────────────────► │ FAIL → NACK → DLQ
-//! │       NotificationEvent  (or legacy EmailEvent fallback)        │
-//! │                                                                 │
-//! │  2a. No email channel_overrides? ──────────────────────────────► mark_skipped → ACK
-//! │  2b. Recipients empty?          ──────────────────────────────► mark_skipped → ACK
-//! │  2c. Recipients > max_per_event? ─────────────────────────────► mark_skipped → NACK → DLQ
-//! │                                                                 │
-//! │  3. Fetch attachments (once for all recipients) ───────────────► FAIL permanent → NACK → DLQ
-//! │                                                                 │    transient  → NACK → requeue
-//! │  4. Filter CC / BCC (once per event)                           │
-//! │       invalid / blocked address ──────────────────────────────► WARN + exclude (delivery continues)
-//! │                                                                 │
-//! │  5. Dispatch ──────────────────────────────────────────────────┤
-//! │       send_mode = Group  ─────────────────────────────────────► process_one_group
-//! │       send_mode = Individual (default)                         │
-//! │         └─ per recipient (parallel JoinSet tasks)             ► process_one_recipient
-//! │                                                                 │
-//! │  6. ACK (after all tasks complete)                             │
-//! └─────────────────────────────────────────────────────────────────┘
+//! ┌──────────────────────────────────────────────────────────────────────┐
+//! │ handle_delivery                                                      │
+//! │                                                                      │
+//! │  1. Deserialise ────────────────────────────────────────────────────► FAIL → NACK → DLQ
+//! │       NotificationEvent  (or legacy EmailEvent fallback)             │
+//! │                                                                      │
+//! │  2a. No email channel_overrides? ──────────────────────────────────► mark_skipped → ACK
+//! │  2b. recipients empty?           ──────────────────────────────────► mark_skipped → ACK
+//! │  2c. recipients.len() > max_per_event? ────────────────────────────► mark_skipped → NACK → DLQ
+//! │                                                                      │
+//! │  3. Fetch attachments (once for all recipients) ────────────────────► FAIL permanent → NACK → DLQ
+//! │                                                                      │    transient  → NACK → requeue
+//! │  4. Filter CC / BCC (once per event)                                 │
+//! │       invalid address    ──────────────────────────────────────────► WARN + exclude
+//! │       config-file filter ──────────────────────────────────────────► WARN + exclude
+//! │       DB block_list      ──────────────────────────────────────────► WARN + exclude
+//! │       (delivery continues in all cases)                              │
+//! │                                                                      │
+//! │       ┌─ NOTE ──────────────────────────────────────────────────┐   │
+//! │       │ TO recipients are NOT filtered here.  Their validity    │   │
+//! │       │ and block-list checks run inside process_recipient      │   │
+//! │       │ (steps 0, 5, 6) after the idempotency INSERT.           │   │
+//! │       └─────────────────────────────────────────────────────────┘   │
+//! │                                                                      │
+//! │  5. Dispatch ──────────────────────────────────────────────────────► │
+//! │       send_mode = Group      ──────────────────────────────────────► process_one_group
+//! │       send_mode = Individual (default)                               │
+//! │         └─ one task per recipient (parallel JoinSet) ──────────────► process_one_recipient
+//! │                                                                      │
+//! │  6. ACK (after all tasks complete)                                   │
+//! └──────────────────────────────────────────────────────────────────────┘
 //!
-//! ┌─────────────────────────────────────────────────────────────────┐
-//! │ process_one_recipient  (retry loop)                             │
-//! │                                                                 │
-//! │  process_recipient() ─────────────────────────────────────────► RecipientOutcome
-//! │    │                                                            │
-//! │    ├─ Sent / Blocked / Skipped ───────────────────────────────► return (terminal)
-//! │    │                                                            │
-//! │    ├─ Duplicate { retry_count } ───────────────────────────────► seed attempt counter, retry immediately
-//! │    │                                                            │
-//! │    ├─ Failed (permanent) ──────────────────────────────────────► mark_failed(exhausted=true) → return
-//! │    ├─ Failed (attempt ≥ max_retries) ──────────────────────────► mark_failed(exhausted=true) → return
-//! │    ├─ Failed + NoRetry policy ─────────────────────────────────► mark_failed(exhausted=true) → return
-//! │    │                                                            │
-//! │    ├─ Failed (RateLimited, rl_count ≤ max_rl_waits) ──────────► mark_failed(exhausted=false)
-//! │    │    └─ sleep(30s × 2^rl_count, max 4h) ──────────────────► retry
-//! │    ├─ Failed (RateLimited, rl_count > max_rl_waits) ──────────► mark_failed(exhausted=true) → return
-//! │    │                                                            │
-//! │    └─ Failed (transient) ──────────────────────────────────────► mark_failed(exhausted=false)
-//! │         └─ sleep(base × 2^attempt, max 30 min) ──────────────► retry
-//! │                                                                 │
-//! │  Shutdown during backoff ─────────────────────────────────────► mark_failed(exhausted=true) → return
-//! └─────────────────────────────────────────────────────────────────┘
+//! ┌──────────────────────────────────────────────────────────────────────┐
+//! │ process_one_recipient  (retry loop — individual mode)                │
+//! │                                                                      │
+//! │  Calls process_recipient() on each iteration → RecipientOutcome      │
+//! │                                                                      │
+//! │    Sent / Blocked / Skipped ──────────────────────────────────────► return (terminal)
+//! │                                                                      │
+//! │    Duplicate { retry_count } ─────────────────────────────────────► seed attempt from DB, retry immediately
+//! │                                                                      │
+//! │    Failed (permanent error)   ────────────────────────────────────► mark_failed(exhausted=true) → return
+//! │    Failed (attempt ≥ max_retries) ────────────────────────────────► mark_failed(exhausted=true) → return
+//! │    Failed (RetryPolicy::NoRetry) ─────────────────────────────────► mark_failed(exhausted=true) → return
+//! │                                                                      │
+//! │    Failed (RateLimited, rl_count ≤ max_rl_waits) ─────────────────► mark_failed(exhausted=false)
+//! │      └─ sleep(30s × 2^rl_count, max 4h) ──────────────────────────► retry
+//! │    Failed (RateLimited, rl_count > max_rl_waits) ─────────────────► mark_failed(exhausted=true) → return
+//! │                                                                      │
+//! │    Failed (transient) ─────────────────────────────────────────────► mark_failed(exhausted=false)
+//! │      └─ sleep(retry_base_ms × 2^attempt, max 30 min) ─────────────► retry
+//! │                                                                      │
+//! │    GroupFailedWithIndividualRows ──────────────────────────────────► unexpected here
+//! │                                                                      │   → mark_failed(exhausted=true) → return
+//! │  Shutdown during any backoff ─────────────────────────────────────► mark_failed(exhausted=true) → return
+//! └──────────────────────────────────────────────────────────────────────┘
 //!
-//! ┌─────────────────────────────────────────────────────────────────┐
-//! │ process_one_group  (retry loop, mirrors process_one_recipient)  │
-//! │                                                                 │
-//! │  Same outcomes as above, plus:                                  │
-//! │    GroupFailedWithIndividualRows ─────────────────────────────► spawn process_one_recipient
-//! │      (group_retry_mode = Individual)                            │  per address (parallel JoinSet)
-//! │      already-SENT rows are skipped by idempotency guard        │
-//! └─────────────────────────────────────────────────────────────────┘
+//! ┌──────────────────────────────────────────────────────────────────────┐
+//! │ process_one_group  (retry loop — group mode)                         │
+//! │                                                                      │
+//! │  Calls process_group() on each iteration (one EmailMessage, all      │
+//! │  recipients share the To: header).  Outcomes mirror                  │
+//! │  process_one_recipient except:                                       │
+//! │                                                                      │
+//! │    GroupFailedWithIndividualRows ─────────────────────────────────► spawn process_one_recipient
+//! │      process_group already wrote a log row per recipient             │  per address (parallel JoinSet)
+//! │      → fall back to individual sends for unsent addresses            │
+//! │      → already-SENT rows skipped by idempotency guard in            │
+//! │        process_recipient                                             │
+//! │      → retried recipients receive individual (non-shared To:) email  │
+//! │                                                                      │
+//! │    Failed / RateLimited / transient / Shutdown ───────────────────► same as process_one_recipient
+//! │      except mark_failed targets recipients[0] (the primary row)      │
+//! └──────────────────────────────────────────────────────────────────────┘
 //!
-//! ┌─────────────────────────────────────────────────────────────────┐
-//! │ process_recipient  (single attempt, called by the loops above)  │
-//! │                                                                 │
-//! │  0. Validate recipient email address                           │
-//! │  1. Resolve template (cached TTL)                              │
-//! │  2. Validate from_override address                             │
-//! │  3. Render subject / body_html / body_text                     │
-//! │  4. Idempotency: INSERT PENDING (ON CONFLICT → Duplicate)      │
-//! │  5. Config-file recipient filter                               │
-//! │  6. DB block_list_store check                                  │
-//! │  7. Rate-limiter token (wait or Shutdown)                      │
-//! │  8. Select sender (named account registry → global fallback)   │
-//! │  9. sender.send(EmailMessage)                                  │
-//! │ 10. mark_sent / mark_failed / mark_blocked                     │
-//! └─────────────────────────────────────────────────────────────────┘
+//! ┌──────────────────────────────────────────────────────────────────────┐
+//! │ process_recipient  (single attempt — called by both retry loops)     │
+//! │                                                                      │
+//! │   0. Validate recipient email address  ────────────────────────────► invalid → Blocked (permanent)
+//! │   1. Resolve template (cached, TTL-based)                            │
+//! │   2. Validate from_override address                                  │
+//! │   3. Render subject / body_html / body_text                          │
+//! │   4. Idempotency: INSERT PENDING  ─────────────────────────────────► ON CONFLICT → Duplicate { retry_count }
+//! │   5. Config-file recipient filter  ────────────────────────────────► blocked → mark_blocked → Blocked
+//! │   6. DB block_list_store check     ────────────────────────────────► blocked → mark_blocked → Blocked
+//! │   7. Rate-limiter token (wait or Shutdown)                           │
+//! │   8. Select sender (named account registry → global fallback)        │
+//! │   9. sender.send(EmailMessage)                                       │
+//! │  10. mark_sent / mark_failed / mark_blocked                          │
+//! └──────────────────────────────────────────────────────────────────────┘
 //! ```
 
 use std::sync::Arc;
@@ -127,22 +164,25 @@ const MAX_RETRY_DELAY_MS: u64 = 30 * 60 * 1000; // 30 minutes
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Handle one delivery.
+/// Handle one AMQP delivery end-to-end.
 ///
-/// Attachments are fetched ONCE here at the event level, then the resolved
-/// bytes are passed to every recipient task.  This prevents N×M HTTP GETs
-/// and pre-signed URL expiry for recipients processed later in the list.
+/// **Attachments** are fetched once at the event level and the resolved bytes
+/// are forwarded to every recipient task, preventing N×M HTTP round-trips and
+/// pre-signed URL expiry for recipients processed later in the list.
 ///
-/// Recipients are processed **in parallel** via a `JoinSet`: each recipient
-/// gets its own task with its own retry loop.  The semaphore permit is held
-/// for the entire delivery so total in-flight messages stays bounded, but
-/// within a message recipients no longer block each other — a long retry
-/// backoff on one address does not delay sends to other addresses in the
-/// same event.
+/// **CC / BCC filtering** runs once here before dispatch.  Invalid or
+/// block-listed copy addresses are excluded (WARN-logged) and delivery
+/// continues.  TO recipients are *not* filtered at this stage; their validity
+/// and block-list checks run inside [`process_recipient`] after the
+/// idempotency INSERT (see module-level doc for the rationale).
 ///
-/// The AMQP message is ACK'd once ALL recipient tasks have finished.
-/// It is NACK'd (→ DLQ) only if the message cannot be deserialized or if
-/// the event-level attachment fetch fails permanently.
+/// **Recipients** are processed in parallel via a `JoinSet`: each TO recipient
+/// gets its own task with its own retry loop so a slow or failing address does
+/// not block others in the same event.
+///
+/// **ACK / NACK** — the AMQP message is ACK'd once all recipient tasks finish.
+/// It is NACK'd (→ DLQ) only on unrecoverable event-level failures:
+/// deserialization errors or permanent attachment-fetch failures.
 pub(crate) async fn handle_delivery(
     delivery: Delivery,
     ctx: ProcessorContext,
@@ -444,11 +484,16 @@ pub(crate) async fn handle_delivery(
 
 // ── Per-recipient retry loop ──────────────────────────────────────────────────
 
-/// Drive one recipient through the full retry loop.
+/// Drive one recipient through the retry loop (individual send mode).
 ///
-/// Each call to `process_recipient` produces a `RecipientOutcome`; this
-/// function decides whether to retry, back off, or give up, and keeps
-/// looping until a terminal outcome is reached.
+/// Calls [`process_recipient`] on each iteration and acts on the returned
+/// [`RecipientOutcome`]: terminal outcomes (`Sent`, `Blocked`, `Skipped`,
+/// permanent failures) return immediately; transient failures sleep with
+/// exponential backoff and retry; `RateLimited` outcomes use a separate
+/// counter and a fixed-base backoff capped at `max_rl_waits`.
+///
+/// [`GroupFailedWithIndividualRows`](RecipientOutcome::GroupFailedWithIndividualRows)
+/// is only emitted by the group path and is treated as an unexpected error here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_one_recipient(
     ctx: &ProcessorContext,
@@ -672,10 +717,22 @@ pub(crate) async fn process_one_recipient(
 
 // ── Group send retry loop ─────────────────────────────────────────────────────
 
-/// Drive a group send through the retry loop.
+/// Drive a group send through the retry loop (group send mode).
 ///
-/// Mirrors `process_one_recipient` but calls `process_group` instead, which
-/// builds one `EmailMessage` with all recipients sharing the `To:` header.
+/// Calls [`process_group`] on each iteration, which builds one
+/// [`EmailMessage`](mailer::message::EmailMessage) with all recipients sharing
+/// the `To:` header.  Retry logic mirrors [`process_one_recipient`] with one
+/// additional outcome:
+///
+/// **[`GroupFailedWithIndividualRows`](RecipientOutcome::GroupFailedWithIndividualRows)**
+/// — emitted when `process_group` writes a `notification_log` row per
+/// recipient before the send attempt fails.  Re-sending the whole group email
+/// would duplicate recipients already delivered to by the SMTP server.
+/// Instead, this function falls back to [`process_one_recipient`] for each
+/// address; recipients whose row is already `SENT` or `BLOCKED` are skipped
+/// by the idempotency guard inside `process_recipient`.  Trade-off: retried
+/// recipients receive an individual email whose `To:` header shows only their
+/// own address.
 pub(crate) async fn process_one_group(
     ctx: &ProcessorContext,
     event: &NotificationEvent,
