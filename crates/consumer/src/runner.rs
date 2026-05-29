@@ -210,35 +210,6 @@ fn append_heartbeat_param(url: &str, heartbeat_secs: u16) -> String {
     }
 }
 
-#[cfg(test)]
-mod heartbeat_tests {
-    use super::append_heartbeat_param;
-
-    #[test]
-    fn appends_to_plain_url() {
-        let url = "amqp://guest:guest@localhost:5672";
-        assert_eq!(
-            append_heartbeat_param(url, 60),
-            "amqp://guest:guest@localhost:5672?heartbeat=60"
-        );
-    }
-
-    #[test]
-    fn appends_to_url_with_existing_query() {
-        let url = "amqp://guest:guest@localhost:5672/%2f?connection_timeout=10000";
-        assert_eq!(
-            append_heartbeat_param(url, 60),
-            "amqp://guest:guest@localhost:5672/%2f?connection_timeout=10000&heartbeat=60"
-        );
-    }
-
-    #[test]
-    fn leaves_existing_heartbeat_untouched() {
-        let url = "amqp://guest:guest@localhost:5672?heartbeat=30";
-        assert_eq!(append_heartbeat_param(url, 60), url);
-    }
-}
-
 // ── Topology ──────────────────────────────────────────────────────────────────
 
 async fn declare_topology(
@@ -423,4 +394,33 @@ async fn declare_topology(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod heartbeat_tests {
+    use super::append_heartbeat_param;
+
+    #[test]
+    fn appends_to_plain_url() {
+        let url = "amqp://guest:guest@localhost:5672";
+        assert_eq!(
+            append_heartbeat_param(url, 60),
+            "amqp://guest:guest@localhost:5672?heartbeat=60"
+        );
+    }
+
+    #[test]
+    fn appends_to_url_with_existing_query() {
+        let url = "amqp://guest:guest@localhost:5672/%2f?connection_timeout=10000";
+        assert_eq!(
+            append_heartbeat_param(url, 60),
+            "amqp://guest:guest@localhost:5672/%2f?connection_timeout=10000&heartbeat=60"
+        );
+    }
+
+    #[test]
+    fn leaves_existing_heartbeat_untouched() {
+        let url = "amqp://guest:guest@localhost:5672?heartbeat=30";
+        assert_eq!(append_heartbeat_param(url, 60), url);
+    }
 }

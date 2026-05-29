@@ -16,13 +16,13 @@ cargo fmt -- --check
 if [ -d ".sqlx" ]; then
     echo "--- 🗃️ Checking SQLx metadata (cargo sqlx prepare) ---"
     # --check ensures the .sqlx directory matches your current code and DB schema
-    cargo sqlx prepare --workspace --check -- --all-targets --all-features
+    cargo sqlx prepare --workspace --check -- --all-targets --all-features --all
 fi
 
 # 3. Clippy Lints
 # Treats warnings as errors so sloppy code can't get through
 echo "--- 🔬 Running linter (cargo clippy) ---"
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets --all-features --all -- -D warnings
 
 # 4. Build Check
 # Ensures everything actually compiles cleanly

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE notification_log SET updated_at = now() - interval '10 minutes' WHERE event_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "67763633ffbe2727b6949ad4e50926f787911ff24e65dc4ea4ea7a7c919905d3"
+}

@@ -26,7 +26,7 @@ mod processor_tests {
     use rate_limiter::{MailRateLimiter, RateLimitConfig};
     use recipient_filter::{FilterConfig, RecipientFilter};
     use serde_json::json;
-    use tokio_retry::Retry;
+
     use uuid::Uuid;
 
     use crate::config::ConsumerConfig;
@@ -503,7 +503,7 @@ mod processor_tests {
 
         let policy = RetryPolicy::NoRetry;
         let max_retries: u32 = 5;
-        let mut attempt: u32 = 0;
+        let attempt: u32 = 0;
         let mut marked_failed = false;
 
         let err = AppError::transient_mailer("connection reset");
@@ -523,7 +523,7 @@ mod processor_tests {
 
         let policy = RetryPolicy::NoRetry;
         let max_retries: u32 = 5;
-        let mut attempt: u32 = 0;
+        let attempt: u32 = 0;
         let mut marked_failed = false;
 
         let err = AppError::RateLimited("429 from mail server".into());
@@ -574,14 +574,14 @@ mod processor_tests {
 
         // attempt=10 with base 1000 gives 1024 s ≈ 17 min, still under cap
         let delay_at_10 = retry_base_ms
-            .saturating_mul(1u64 << 10u64.min(10))
+            .saturating_mul(1u64 << 10)
             .min(MAX_RETRY_DELAY_MS);
         assert_eq!(delay_at_10, 1_024_000);
 
         // A very large base must saturate to the 30-minute cap
         let large_base: u64 = 60 * 60 * 1_000; // 1 hour
         let delay_large = large_base
-            .saturating_mul(1u64 << 1u64.min(10))
+            .saturating_mul(1u64 << 1u64)
             .min(MAX_RETRY_DELAY_MS);
         assert_eq!(
             delay_large, MAX_RETRY_DELAY_MS,
@@ -597,7 +597,7 @@ mod processor_tests {
         let retry_base_ms: u64 = u64::MAX / 2 + 1;
 
         let delay = retry_base_ms
-            .saturating_mul(1u64 << 1u64.min(10))
+            .saturating_mul(1u64 << 1u64)
             .min(MAX_RETRY_DELAY_MS);
 
         assert_eq!(
@@ -876,7 +876,6 @@ mod processor_tests {
     #[test]
     fn group_empty_recipients_is_permanent_failure() {
         use crate::processor::RecipientOutcome;
-        use common::{EmailOptions, GroupRetryMode, RetryPolicy, SendMode};
 
         // Simulate the guard at the top of process_group:
         //   let primary = match recipients.first() { None => return Failed(...) }
