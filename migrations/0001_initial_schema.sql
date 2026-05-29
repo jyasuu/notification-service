@@ -23,7 +23,7 @@
 --   notification_template   — Jinja2 templates for all notification channels.
 --   block_list              — runtime recipient block/allow-list.
 
-CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+-- CREATE EXTENSION IF NOT EXISTS "pgcrypto"; 
 
 -- ── outbox ────────────────────────────────────────────────────────────────────
 --

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE notification_log\n               SET status     = 'FAILED',\n                   last_error = 'Orphaned by stale-PENDING reaper: PENDING row exceeded timeout with no AMQP message to drive it. Trigger a manual retry when the broker is healthy.',\n                   updated_at = now()\n             WHERE status     = 'PENDING'\n               AND channel    = $1\n               AND updated_at < now() - ($2 || ' seconds')::interval\n            RETURNING event_id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f8ca55de8bb54fd413937c588f4e5fb861b70b35bfecbfa79f9732f568a8c638"
+}

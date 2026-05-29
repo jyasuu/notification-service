@@ -49,7 +49,7 @@
 //! │                                                                      │
 //! │  2a. No email channel_overrides? ──────────────────────────────────► mark_skipped → ACK
 //! │  2b. recipients empty?           ──────────────────────────────────► mark_skipped → ACK
-//! │  2c. recipients.len() > max_per_event? ────────────────────────────► mark_skipped → NACK → DLQ
+//! │  2c. recipients.len() > max_per_event? ────────────────────────────► insert FAILED rows per recipient → ACK
 //! │                                                                      │
 //! │  3. Fetch attachments (once for all recipients) ────────────────────► FAIL permanent → NACK → DLQ
 //! │                                                                      │    transient  → NACK → requeue
@@ -148,6 +148,8 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 use uuid::Uuid;
+
+use store::{EmailInsertPendingArgs, NotificationStore};
 
 use crate::{
     config::ConsumerConfig,
@@ -291,40 +293,28 @@ pub(crate) async fn handle_delivery(
 
     // Guard against pathologically large recipient lists that would monopolise
     // the semaphore permit for an unbounded duration and exhaust DB connections.
-    // Write a SKIPPED row with a sentinel recipient_id before NACKing so an
-    // operator can diagnose the rejection via GET /emails/{event_id} rather
-    // than seeing a 404 and wondering whether the event was ever received.
+    //
+    // Rather than NACKing to the DLQ (which hides the event from the status
+    // API and forces manual DLQ inspection), we write one FAILED row per
+    // recipient and ACK the message.  This makes every affected address
+    // visible via GET /emails/{event_id} and recoverable via the retry API
+    // once the publisher reduces the list or the limit is raised.
     if email_opts.recipients.len() > cfg.max_recipients_per_event {
         error!(
             event_id        = %event.event_id,
             event_type      = %event.event_type,
             recipient_count = email_opts.recipients.len(),
             limit           = cfg.max_recipients_per_event,
-            "Event exceeds max_recipients_per_event — writing SKIPPED row and sending to DLQ"
+            "Event exceeds max_recipients_per_event — writing FAILED rows for all recipients and ACKing"
         );
         let reason = format!(
             "recipient count {} exceeds max_recipients_per_event {} — \
-             reduce the list or raise the limit before re-publishing",
+             raise the limit or split this event before retrying",
             email_opts.recipients.len(),
             cfg.max_recipients_per_event,
         );
-        let _ = ctx
-            .store
-            .mark_skipped(
-                event.event_id,
-                &event.event_type,
-                &format!("event:{}", event.event_id),
-                &reason,
-                event.timestamp,
-                &event.payload,
-            )
-            .await;
-        let _ = delivery
-            .nack(BasicNackOptions {
-                requeue: false,
-                ..Default::default()
-            })
-            .await;
+        insert_failed_for_all_recipients(&ctx.store, &event, &email_opts, &reason).await;
+        let _ = delivery.ack(BasicAckOptions::default()).await;
         return;
     }
 
@@ -440,21 +430,32 @@ pub(crate) async fn handle_delivery(
 
     // ── Dispatch: group send or per-recipient individual sends ───────────────
     if email_opts.send_mode == SendMode::Group {
-        // Warn when group_retry_mode = Whole (the default): if any recipient's
-        // SMTP delivery succeeds in a partial attempt before the send fails,
-        // that recipient will receive the email twice on retry.
-        // Use group_retry_mode = Individual to avoid this — it writes one log
-        // row per recipient so already-SENT addresses are skipped on retry.
+        // Warn when group_retry_mode = Whole and this delivery is a re-attempt:
+        // any recipient whose SMTP delivery already succeeded in a prior partial
+        // attempt will receive the email again.
+        // We probe the DB for the primary recipient to detect a retry cheaply
+        // (one query, not N) before spawning the group send.
+        // Use group_retry_mode = Individual to avoid double-sends on retry.
         if email_opts.group_retry_mode == GroupRetryMode::Whole {
-            warn!(
-                event_id   = %event.event_id,
-                event_type = %event.event_type,
-                recipients = email_opts.recipients.len(),
-                "Group send with group_retry_mode=whole: if this send partially \
-                 succeeds and is retried, recipients who already received the \
-                 email may receive it again. Consider setting \
-                 group_retry_mode=individual to avoid double-sends on retry."
-            );
+            let is_retry = if let Some(primary) = email_opts.recipients.first() {
+                ctx.store
+                    .get_by_event_and_recipient(event.event_id, &primary.email)
+                    .await
+                    .is_ok() // row exists → this is a redelivery
+            } else {
+                false
+            };
+            if is_retry {
+                warn!(
+                    event_id   = %event.event_id,
+                    event_type = %event.event_type,
+                    recipients = email_opts.recipients.len(),
+                    "Group send retry with group_retry_mode=whole: recipients who \
+                     already received this email in a prior attempt may receive it \
+                     again. Set group_retry_mode=individual on future events to \
+                     avoid double-sends on retry."
+                );
+            }
         }
         process_one_group(
             &ctx,
@@ -978,6 +979,62 @@ pub(crate) async fn process_one_group(
                         return;
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Write a FAILED row for every recipient in an oversized event so operators
+/// can see and recover them via the status/retry API without touching the DLQ.
+///
+/// Errors from individual inserts are logged and skipped — a partial write is
+/// better than silently dropping all rows.  The caller ACKs the AMQP message
+/// regardless, since the event-level problem (too many recipients) is not
+/// transient and re-queuing would loop forever.
+async fn insert_failed_for_all_recipients(
+    store: &Arc<dyn NotificationStore>,
+    event: &NotificationEvent,
+    email_opts: &common::EmailOptions,
+    reason: &str,
+) {
+    for r in &email_opts.recipients {
+        let args = EmailInsertPendingArgs {
+            event_id: event.event_id,
+            event_type: &event.event_type,
+            recipient_email: &r.email,
+            payload: &event.payload,
+            event_timestamp: event.timestamp,
+            recipient_name: r.name.as_deref(),
+            from_override: None,
+            attachments: None,
+            sender_account: None,
+            cc: None,
+            bcc: None,
+            send_mode: "individual",
+            group_retry_mode: None,
+            to_recipients: None,
+        };
+        match store.insert_pending(&args).await {
+            Ok(_) => {
+                if let Err(e) = store
+                    .mark_failed(event.event_id, &r.email, reason, true)
+                    .await
+                {
+                    error!(
+                        event_id  = %event.event_id,
+                        email     = %r.email,
+                        error     = %e,
+                        "insert_failed_for_all_recipients: mark_failed error"
+                    );
+                }
+            }
+            Err(e) => {
+                error!(
+                    event_id  = %event.event_id,
+                    email     = %r.email,
+                    error     = %e,
+                    "insert_failed_for_all_recipients: insert_pending error"
+                );
             }
         }
     }

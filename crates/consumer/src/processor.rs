@@ -33,6 +33,17 @@ pub struct EffectiveCcBcc {
 }
 
 /// Shared, cheaply-cloneable context passed to every per-recipient processor call.
+///
+/// # Clone cost
+///
+/// `Clone` on this struct is shallow — every field is either an `Arc<_>` or a
+/// type that wraps one internally (`TemplateStore`, `BlockListStore`, and
+/// `MailRateLimiter` all hold their state behind an `Arc`; `SenderRegistry`
+/// clones a `HashMap<String, Arc<dyn EmailSender>>`; `RecipientFilter` clones
+/// two `HashSet`s whose size is bounded by config).  Cloning `ProcessorContext`
+/// **never** deep-copies DB pools, connection state, or cache data.  Adding a
+/// field that does not follow this pattern (e.g. a `Vec<u8>` or an unbounded
+/// cache) would silently make every per-recipient clone expensive.
 #[derive(Clone)]
 pub struct ProcessorContext {
     pub store: Arc<dyn NotificationStore>,

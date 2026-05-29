@@ -156,7 +156,7 @@ Or use the CLI to send a test event directly:
 ```bash
 cargo run --bin anctl -- send \
   --event-type ORDER_CONFIRMATION \
-  --recipient alice@example.com \
+  --to alice@example.com \
   --payload '{"orderId":"123","amount":"99.90","name":"Alice"}'
 ```
 
@@ -351,7 +351,7 @@ anctl logs --limit 20 --status FAILED
 anctl retry --event-id <uuid>
 
 # Send a test event
-anctl send --event-type ORDER_CONFIRMATION --recipient user@example.com --payload '{}'
+anctl send --event-type ORDER_CONFIRMATION --to user@example.com --payload '{}'
 
 # Manage templates
 anctl template list

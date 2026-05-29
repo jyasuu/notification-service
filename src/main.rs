@@ -215,6 +215,30 @@ async fn main() -> anyhow::Result<()> {
                  Consider setting burst_size >= emails_per_second."
             );
         }
+        // Warn when burst_size is much larger than emails_per_second.  After any
+        // quiet period the token bucket refills to burst_size, so the first wave
+        // of sends after an idle window will hit the SMTP server at burst_size
+        // messages all at once — potentially triggering provider-side throttling
+        // or bans.  The threshold is 5× the steady-state rate; beyond that the
+        // burst is almost certainly unintentional.
+        const BURST_RATIO_WARN: u32 = 5;
+        if cfg.rate_limit.emails_per_second > 0
+            && cfg.rate_limit.burst_size
+                > cfg
+                    .rate_limit
+                    .emails_per_second
+                    .saturating_mul(BURST_RATIO_WARN)
+        {
+            tracing::warn!(
+                emails_per_second = cfg.rate_limit.emails_per_second,
+                burst_size = cfg.rate_limit.burst_size,
+                threshold = cfg.rate_limit.emails_per_second * BURST_RATIO_WARN,
+                "burst_size is more than {BURST_RATIO_WARN}× emails_per_second; after any \
+                 quiet period the token bucket will release up to burst_size emails at once, \
+                 which may trigger provider-side rate limiting. \
+                 Consider setting burst_size closer to emails_per_second."
+            );
+        }
     }
 
     // ── Recipient filter ──────────────────────────────────────────────────────
@@ -316,11 +340,18 @@ async fn main() -> anyhow::Result<()> {
                 _ = reaper_shutdown.cancelled() => break,
                 _ = interval.tick() => {
                     match reaper_store.reap_stale_pending(reaper_timeout).await {
-                        Ok(n) if n > 0 => tracing::warn!(
-                            count = n,
-                            timeout_secs = reaper_timeout,
-                            "Stale-PENDING reaper: marked {n} orphaned rows as FAILED",
-                        ),
+                        Ok(ids) if !ids.is_empty() => {
+                            let event_ids: Vec<String> =
+                                ids.iter().map(|id| id.to_string()).collect();
+                            tracing::warn!(
+                                count        = ids.len(),
+                                timeout_secs = reaper_timeout,
+                                event_ids    = %event_ids.join(", "),
+                                "Stale-PENDING reaper: marked {} orphaned rows as FAILED — \
+                                 use `anctl retry --event-id <id>` to recover",
+                                ids.len(),
+                            )
+                        }
                         Ok(_) => {}
                         Err(e) => tracing::error!(error = %e, "Stale-PENDING reaper error"),
                     }

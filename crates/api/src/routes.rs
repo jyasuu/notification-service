@@ -1,3 +1,6 @@
+use std::num::NonZeroU32;
+use std::sync::Arc;
+
 use axum::{
     extract::{DefaultBodyLimit, Request, State},
     http::StatusCode,
@@ -5,6 +8,12 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
+};
+use governor::{
+    clock::DefaultClock,
+    middleware::NoOpMiddleware,
+    state::{InMemoryState, NotKeyed},
+    Quota, RateLimiter,
 };
 use hmac::{Hmac, Mac};
 use serde_json::json;
@@ -30,25 +39,49 @@ use crate::{
 /// that might be added while preventing memory exhaustion from oversized uploads.
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
+/// Maximum retry-endpoint calls per minute.
+///
+/// Each retry re-enqueues an event to RabbitMQ and resets DB rows.  A burst
+/// of retries from a script or dashboard can flood the AMQP queue and
+/// overload the consumer.  60 retries/min is generous for manual operator
+/// use while still preventing accidental storms.
+const RETRY_RATE_PER_MIN: u32 = 60;
+
+type RetryLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>;
+
 pub fn build_router(state: ApiState) -> Router {
     // Probe routes are always open — no auth needed for health checks.
     let probes = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready));
 
+    // Retry endpoints get an additional token-bucket rate limiter so that a
+    // script or runaway dashboard cannot flood the AMQP queue.  Read endpoints
+    // (status, blocklist list) are not rate-limited — they are idempotent and
+    // cheap.
+    let retry_limiter: Arc<RetryLimiter> = Arc::new(RateLimiter::direct(Quota::per_minute(
+        NonZeroU32::new(RETRY_RATE_PER_MIN).expect("RETRY_RATE_PER_MIN > 0"),
+    )));
+
+    let retry_routes = Router::new()
+        .route("/emails/{event_id}/retry", post(retry_event))
+        .route(
+            "/emails/{event_id}/recipients/{email}/retry",
+            post(retry_recipient),
+        )
+        .layer(middleware::from_fn_with_state(
+            retry_limiter,
+            retry_rate_limit,
+        ));
+
     // All email status and retry routes require a bearer token when
     // `api_key` is configured. When `api_key` is `None` (network-isolated
     // deployments), the middleware passes every request through.
     let protected = Router::new()
         .route("/emails/{event_id}", get(get_email_status))
-        .route("/emails/{event_id}/retry", post(retry_event))
         .route(
             "/emails/{event_id}/recipients/{email}",
             get(get_recipient_status),
-        )
-        .route(
-            "/emails/{event_id}/recipients/{email}/retry",
-            post(retry_recipient),
         )
         // Template cache invalidation — useful after editing notification_template rows
         // without restarting the service.
@@ -63,6 +96,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/admin/blocklist/cache", delete(invalidate_blocklist_cache))
         .route("/admin/blocklist/cache", post(reload_blocklist_cache))
         .route("/admin/blocklist/{id}", delete(remove_blocklist_entry))
+        .merge(retry_routes)
         .layer(middleware::from_fn_with_state(state.clone(), bearer_auth));
 
     Router::new()
@@ -71,6 +105,28 @@ pub fn build_router(state: ApiState) -> Router {
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// Axum middleware that enforces a token-bucket rate limit on retry endpoints.
+///
+/// Returns 429 Too Many Requests when the bucket is empty, with a
+/// `Retry-After: 60` header so clients know when to try again.
+async fn retry_rate_limit(
+    State(limiter): State<Arc<RetryLimiter>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if limiter.check().is_err() {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("Retry-After", "60")],
+            Json(json!({
+                "error": "retry rate limit exceeded — maximum 60 retries per minute"
+            })),
+        )
+            .into_response();
+    }
+    next.run(request).await
 }
 
 /// Axum middleware that enforces `Authorization: Bearer <token>` on every

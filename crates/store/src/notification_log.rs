@@ -147,8 +147,9 @@ pub trait NotificationStore: Send + Sync + 'static {
     ///
     /// These are "orphaned" rows: status = PENDING with no AMQP message to
     /// drive them forward (e.g. after a broker blip during a retry call).
-    /// Returns the number of rows updated.
-    async fn reap_stale_pending(&self, timeout_secs: u64) -> Result<u64, AppError>;
+    /// Returns the `event_id` values of every row that was updated so the
+    /// caller can log them for operator diagnosis and manual recovery.
+    async fn reap_stale_pending(&self, timeout_secs: u64) -> Result<Vec<Uuid>, AppError>;
 
     /// Mark a delivery as blocked by the recipient filter.
     async fn mark_blocked(
@@ -939,13 +940,11 @@ impl NotificationStore for EmailNotificationStore {
         })
     }
 
-    async fn reap_stale_pending(&self, timeout_secs: u64) -> Result<u64, AppError> {
-        // Mark PENDING rows that are older than `timeout_secs` as FAILED.
-        // These are orphaned rows: the AMQP message that should drive them
-        // was lost (e.g. a broker blip mid-retry-API call).
-        // We use a conservative last_error message so operators understand
-        // this is an infrastructure issue, not a delivery failure.
-        let result = sqlx::query!(
+    async fn reap_stale_pending(&self, timeout_secs: u64) -> Result<Vec<Uuid>, AppError> {
+        // Mark PENDING rows that are older than `timeout_secs` as FAILED and
+        // return their event_ids so the caller can log them for operator
+        // diagnosis and targeted manual recovery.
+        let rows = sqlx::query!(
             r#"
             UPDATE notification_log
                SET status     = 'FAILED',
@@ -954,14 +953,15 @@ impl NotificationStore for EmailNotificationStore {
              WHERE status     = 'PENDING'
                AND channel    = $1
                AND updated_at < now() - ($2 || ' seconds')::interval
+            RETURNING event_id
             "#,
             CHANNEL_EMAIL,
             timeout_secs.to_string(),
         )
-        .execute(&self.pool)
+        .fetch_all(&self.pool)
         .await
         .map_err(AppError::Database)?;
-        Ok(result.rows_affected())
+        Ok(rows.into_iter().map(|r| r.event_id).collect())
     }
 
     fn pool(&self) -> &PgPool {
@@ -1136,8 +1136,10 @@ mod tests {
         // ── Run the reaper with a 5-second timeout ────────────────────────────
         let reaped = store.reap_stale_pending(5).await.unwrap();
         assert_eq!(
-            reaped, 1,
-            "Expected exactly 1 stale row reaped, got {reaped}"
+            reaped.len(),
+            1,
+            "Expected exactly 1 stale row reaped, got {}",
+            reaped.len()
         );
 
         // Stale row must now be FAILED with the reaper's signature message.
@@ -1236,7 +1238,8 @@ mod tests {
         // This primarily exercises "is the SQL valid" rather than behaviour.
         let reaped = store.reap_stale_pending(0).await.unwrap();
         assert_eq!(
-            reaped, 1,
+            reaped.len(),
+            1,
             "With 0-second timeout, freshly-inserted PENDING row should be reaped"
         );
     }

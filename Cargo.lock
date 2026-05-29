@@ -212,6 +212,7 @@ dependencies = [
  "axum",
  "chrono",
  "common",
+ "governor",
  "hmac",
  "lapin",
  "metrics",

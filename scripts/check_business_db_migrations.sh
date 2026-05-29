@@ -59,3 +59,39 @@ fi
 
 echo ""
 echo "All shared migration files are in sync."
+
+# ── Outbox table DDL consistency check ───────────────────────────────────────
+#
+# migrations/0001_initial_schema.sql contains the full notify-service schema
+# (notification_log, templates, etc.) plus a shadow copy of the outbox table.
+# migrations/business_db/0001_initial_schema.sql contains ONLY the outbox
+# table.  The two files intentionally differ in their surrounding context, so
+# the byte-for-byte check above skips them.
+#
+# This section extracts the CREATE TABLE outbox ... block from each file and
+# compares only that portion, which is the part that must stay in sync.
+#
+# Extraction: grab every line from "CREATE TABLE IF NOT EXISTS outbox" up to
+# the first standalone ");" that closes it.
+
+extract_outbox_ddl() {
+    local file="$1"
+    awk '/^CREATE TABLE IF NOT EXISTS outbox/,/^\);/' "$file"
+}
+
+notify_outbox=$(extract_outbox_ddl "$ROOT/migrations/0001_initial_schema.sql")
+business_outbox=$(extract_outbox_ddl "$ROOT/migrations/business_db/0001_initial_schema.sql")
+
+if [[ "$notify_outbox" != "$business_outbox" ]]; then
+    echo "" >&2
+    echo "DIFFERS  outbox table DDL in 0001_initial_schema.sql" >&2
+    diff <(echo "$business_outbox") <(echo "$notify_outbox") >&2 || true
+    echo "" >&2
+    echo "ERROR: The outbox CREATE TABLE block has drifted between" >&2
+    echo "  migrations/0001_initial_schema.sql" >&2
+    echo "  migrations/business_db/0001_initial_schema.sql" >&2
+    echo "Apply the same column/index changes to both files." >&2
+    exit 1
+else
+    echo "OK       outbox table DDL (0001_initial_schema.sql)"
+fi
