@@ -113,9 +113,19 @@ pub trait NotificationStore: Send + Sync + 'static {
     /// the set partially written.  If any insert fails the entire batch is
     /// rolled back and the caller receives the error.
     ///
+    /// # ⚠️ Override required for atomicity
+    ///
     /// The default implementation falls back to sequential `insert_pending`
-    /// calls (no atomicity guarantee).  `EmailNotificationStore` overrides
-    /// this with a real database transaction.
+    /// calls with **no atomicity guarantee**.  A crash between two inserts
+    /// leaves the set partially written; on re-delivery the consumer will
+    /// skip the already-written rows (idempotency) and re-insert the rest,
+    /// but the window between the partial write and re-delivery means some
+    /// rows remain in PENDING without an AMQP message driving them forward
+    /// until the stale-PENDING reaper picks them up.
+    ///
+    /// Any concrete implementor that handles `GroupRetryMode::Individual` events
+    /// **must** override this method with a real database transaction, as
+    /// [`EmailNotificationStore`] does.
     async fn insert_pending_batch(
         &self,
         args: &[EmailInsertPendingArgs<'_>],
@@ -847,6 +857,18 @@ impl NotificationStore for EmailNotificationStore {
         // Fetch every row so we can assert event-level field consistency.
         // In the normal case this is identical to get_by_event_id but returns
         // only the fields needed for replay, without per-recipient state.
+        //
+        // NOTE: this uses an INNER JOIN, not LEFT JOIN, because SKIPPED rows
+        // have no `email_notification_log` entry (see `mark_skipped`).  That
+        // means an event whose rows are ALL SKIPPED produces an empty result
+        // set and returns `AppError::NotFound` here.  The `republish_event`
+        // handler in `api/handlers.rs` catches this via its "all SKIPPED"
+        // guard and surfaces a clear 422 rather than a confusing 404.
+        //
+        // Do NOT change this to a LEFT JOIN without also fixing
+        // `get_event_delivery_detail` callers to handle the case where the
+        // event-level fields (from_override, cc, bcc, etc.) are all NULL —
+        // which would silently replay the event with no email options.
         let rows = sqlx::query!(
             r#"
             SELECT

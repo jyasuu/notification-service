@@ -106,14 +106,41 @@
 //! │  process_one_recipient except:                                       │
 //! │                                                                      │
 //! │    GroupFailedWithIndividualRows ─────────────────────────────────► spawn process_one_recipient
-//! │      process_group already wrote a log row per recipient             │  per address (parallel JoinSet)
+//! │      process_group wrote a log row per recipient (Individual mode)   │  per address (parallel JoinSet)
 //! │      → fall back to individual sends for unsent addresses            │
-//! │      → already-SENT rows skipped by idempotency guard in            │
-//! │        process_recipient                                             │
+//! │      → already-SENT/BLOCKED addresses were excluded from the         │
+//! │        retry To: header at step 3c/4b inside process_group           │
+//! │        (idempotency guard in process_recipient is a second layer)    │
 //! │      → retried recipients receive individual (non-shared To:) email  │
 //! │                                                                      │
 //! │    Failed / RateLimited / transient / Shutdown ───────────────────► same as process_one_recipient
 //! │      except mark_failed targets recipients[0] (the primary row)      │
+//! └──────────────────────────────────────────────────────────────────────┘
+//!
+//! ┌──────────────────────────────────────────────────────────────────────┐
+//! │ process_group  (single attempt — called by process_one_group)        │
+//! │                                                                      │
+//! │   0a. Recipient count guard                                          │
+//! │   0b. Validate all To: addresses                                     │
+//! │   1.  Resolve template (cached, TTL-based)                           │
+//! │   2.  Validate from_override; use pre-filtered CC/BCC from caller    │
+//! │   2c. Render subject / body_html / body_text (before DB write)       │
+//! │   3.  Idempotency: INSERT PENDING for primary (Whole)                │
+//! │                    or all recipients (Individual) — single txn       │
+//! │   3b. Inspect primary insert result ───────────────────────────────► Sent|Blocked → Skipped
+//! │                                                                      │  non-terminal → Duplicate
+//! │   3c. Inspect secondary results (Individual mode only)               │
+//! │         Duplicate { Sent | Blocked } → collect into already_sent set │
+//! │         WARN if any already-sent addresses found                     │
+//! │   4.  Config-file filter — partition To: into allowed / blocked      │
+//! │         all blocked → Blocked (drop delivery)                        │
+//! │         some blocked → mark_blocked, continue with allowed set       │
+//! │   4b. Partial-send strip (Individual mode only)                      │
+//! │         remove already_sent addresses from To: list ───────────────► avoids double-delivery
+//! │         (Whole mode: no-op; delivery.rs warn covers that path)       │
+//! │   6 & 7. Rate-limit + send ────────────────────────────────────────► GroupFailedWithIndividualRows (Individual)
+//! │                                                                      │  → Failed (Whole)
+//! │   mark_sent for primary + unsent secondaries (Individual mode)       │
 //! └──────────────────────────────────────────────────────────────────────┘
 //!
 //! ┌──────────────────────────────────────────────────────────────────────┐

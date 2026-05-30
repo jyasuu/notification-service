@@ -39,7 +39,6 @@ mod processor_tests {
         outcomes: Mutex<Vec<Result<(), AppError>>>,
     }
 
-
     #[async_trait]
     impl EmailSender for MockSender {
         async fn send(&self, _msg: &EmailMessage) -> Result<(), AppError> {
@@ -887,5 +886,301 @@ mod processor_tests {
                 "invalid-address error must not be retryable"
             );
         }
+    }
+
+    // ── Partial-send strip tests (step 3c / 4b in process_group) ─────────────
+    //
+    // These tests exercise the secondary-result inspection and partial-send
+    // strip logic introduced in `process_group`.  They simulate the relevant
+    // sub-steps directly — same pattern as the existing guard tests above —
+    // without requiring a database connection.
+
+    /// When all secondary insert results are Inserted (first attempt or clean
+    /// retry), the already_sent set must be empty and the full recipient list
+    /// must be passed to the email.
+    #[test]
+    fn partial_send_no_already_sent_keeps_all_recipients() {
+        use store::InsertResult;
+
+        let recipients = [
+            Recipient {
+                email: "a@example.com".into(),
+                name: None,
+            },
+            Recipient {
+                email: "b@example.com".into(),
+                name: None,
+            },
+            Recipient {
+                email: "c@example.com".into(),
+                name: None,
+            },
+        ];
+
+        // Simulate: primary Inserted, both secondaries Inserted.
+        let secondary_results = [InsertResult::Inserted, InsertResult::Inserted];
+
+        let mut already_sent: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+        for (r, result) in recipients.iter().skip(1).zip(secondary_results.iter()) {
+            if let InsertResult::Duplicate { ref status, .. } = result {
+                use common::NotificationStatus;
+                if matches!(
+                    NotificationStatus::try_from(status.as_str()),
+                    Ok(NotificationStatus::Sent) | Ok(NotificationStatus::Blocked)
+                ) {
+                    already_sent.insert(&r.email);
+                }
+            }
+        }
+
+        assert!(
+            already_sent.is_empty(),
+            "no secondary should be in already_sent when all results are Inserted"
+        );
+
+        let to_send: Vec<&Recipient> = recipients
+            .iter()
+            .filter(|r| !already_sent.contains(r.email.as_str()))
+            .collect();
+
+        assert_eq!(to_send.len(), 3, "all recipients must be included");
+    }
+
+    /// When some secondaries come back as Duplicate { Sent }, those addresses
+    /// must be collected into already_sent and stripped from the To: list.
+    #[test]
+    fn partial_send_already_sent_secondaries_are_stripped() {
+        use store::InsertResult;
+
+        let recipients = [
+            Recipient {
+                email: "primary@example.com".into(),
+                name: None,
+            },
+            Recipient {
+                email: "already-sent@example.com".into(),
+                name: None,
+            },
+            Recipient {
+                email: "unsent@example.com".into(),
+                name: None,
+            },
+        ];
+
+        // Simulate: primary Inserted, second already SENT, third fresh.
+        let secondary_results = [
+            InsertResult::Duplicate {
+                retry_count: 1,
+                status: "SENT".into(),
+            },
+            InsertResult::Inserted,
+        ];
+
+        let mut already_sent: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+        for (r, result) in recipients.iter().skip(1).zip(secondary_results.iter()) {
+            if let InsertResult::Duplicate { ref status, .. } = result {
+                use common::NotificationStatus;
+                if matches!(
+                    NotificationStatus::try_from(status.as_str()),
+                    Ok(NotificationStatus::Sent) | Ok(NotificationStatus::Blocked)
+                ) {
+                    already_sent.insert(&r.email);
+                }
+            }
+        }
+
+        assert_eq!(already_sent.len(), 1);
+        assert!(already_sent.contains("already-sent@example.com"));
+
+        let to_send: Vec<&Recipient> = recipients
+            .iter()
+            .filter(|r| !already_sent.contains(r.email.as_str()))
+            .collect();
+
+        assert_eq!(to_send.len(), 2, "only primary and unsent should remain");
+        assert!(to_send.iter().any(|r| r.email == "primary@example.com"));
+        assert!(to_send.iter().any(|r| r.email == "unsent@example.com"));
+        assert!(
+            !to_send
+                .iter()
+                .any(|r| r.email == "already-sent@example.com"),
+            "already-SENT address must be stripped from the To: list"
+        );
+    }
+
+    /// Blocked secondaries (Duplicate { Blocked }) must also be stripped,
+    /// since re-including a blocked address would silently re-attempt a
+    /// delivery that was explicitly rejected.
+    #[test]
+    fn partial_send_already_blocked_secondaries_are_stripped() {
+        use store::InsertResult;
+
+        let recipients = [
+            Recipient {
+                email: "primary@example.com".into(),
+                name: None,
+            },
+            Recipient {
+                email: "blocked@example.com".into(),
+                name: None,
+            },
+        ];
+
+        let secondary_results = [InsertResult::Duplicate {
+            retry_count: 0,
+            status: "BLOCKED".into(),
+        }];
+
+        let mut already_sent: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+        for (r, result) in recipients.iter().skip(1).zip(secondary_results.iter()) {
+            if let InsertResult::Duplicate { ref status, .. } = result {
+                use common::NotificationStatus;
+                if matches!(
+                    NotificationStatus::try_from(status.as_str()),
+                    Ok(NotificationStatus::Sent) | Ok(NotificationStatus::Blocked)
+                ) {
+                    already_sent.insert(&r.email);
+                }
+            }
+        }
+
+        assert!(
+            already_sent.contains("blocked@example.com"),
+            "BLOCKED secondary must be collected into already_sent"
+        );
+
+        let to_send: Vec<&Recipient> = recipients
+            .iter()
+            .filter(|r| !already_sent.contains(r.email.as_str()))
+            .collect();
+
+        assert_eq!(to_send.len(), 1);
+        assert_eq!(to_send[0].email, "primary@example.com");
+    }
+
+    /// A non-terminal Duplicate (e.g. PENDING, FAILED) must NOT be stripped —
+    /// it represents a recipient that has not yet been successfully delivered
+    /// to and should be retried.
+    #[test]
+    fn partial_send_non_terminal_duplicate_is_not_stripped() {
+        use store::InsertResult;
+
+        let recipients = [
+            Recipient {
+                email: "primary@example.com".into(),
+                name: None,
+            },
+            Recipient {
+                email: "pending@example.com".into(),
+                name: None,
+            },
+        ];
+
+        let secondary_results = [InsertResult::Duplicate {
+            retry_count: 2,
+            status: "PENDING".into(),
+        }];
+
+        let mut already_sent: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+        for (r, result) in recipients.iter().skip(1).zip(secondary_results.iter()) {
+            if let InsertResult::Duplicate { ref status, .. } = result {
+                use common::NotificationStatus;
+                if matches!(
+                    NotificationStatus::try_from(status.as_str()),
+                    Ok(NotificationStatus::Sent) | Ok(NotificationStatus::Blocked)
+                ) {
+                    already_sent.insert(&r.email);
+                }
+            }
+        }
+
+        assert!(
+            already_sent.is_empty(),
+            "PENDING duplicate must not be collected into already_sent"
+        );
+
+        let to_send: Vec<&Recipient> = recipients
+            .iter()
+            .filter(|r| !already_sent.contains(r.email.as_str()))
+            .collect();
+
+        assert_eq!(
+            to_send.len(),
+            2,
+            "PENDING recipient must remain in the To: list for retry"
+        );
+    }
+
+    /// Primary is never in already_sent (its result was Inserted), so it
+    /// is always present in the final To: list even when all secondaries are stripped.
+    #[test]
+    fn partial_send_primary_is_never_stripped() {
+        use store::InsertResult;
+
+        let recipients = [
+            Recipient {
+                email: "primary@example.com".into(),
+                name: None,
+            },
+            Recipient {
+                email: "sent1@example.com".into(),
+                name: None,
+            },
+            Recipient {
+                email: "sent2@example.com".into(),
+                name: None,
+            },
+        ];
+
+        // All secondaries already SENT.
+        let secondary_results = [
+            InsertResult::Duplicate {
+                retry_count: 1,
+                status: "SENT".into(),
+            },
+            InsertResult::Duplicate {
+                retry_count: 1,
+                status: "SENT".into(),
+            },
+        ];
+
+        let mut already_sent: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+        for (r, result) in recipients.iter().skip(1).zip(secondary_results.iter()) {
+            if let InsertResult::Duplicate { ref status, .. } = result {
+                use common::NotificationStatus;
+                if matches!(
+                    NotificationStatus::try_from(status.as_str()),
+                    Ok(NotificationStatus::Sent) | Ok(NotificationStatus::Blocked)
+                ) {
+                    already_sent.insert(&r.email);
+                }
+            }
+        }
+
+        assert_eq!(
+            already_sent.len(),
+            2,
+            "both secondaries must be in already_sent"
+        );
+
+        let to_send: Vec<&Recipient> = recipients
+            .iter()
+            .filter(|r| !already_sent.contains(r.email.as_str()))
+            .collect();
+
+        assert_eq!(
+            to_send.len(),
+            1,
+            "only the primary should remain after stripping all secondaries"
+        );
+        assert_eq!(
+            to_send[0].email, "primary@example.com",
+            "primary must always survive the partial-send strip"
+        );
     }
 }

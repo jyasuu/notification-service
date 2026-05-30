@@ -152,6 +152,15 @@ async fn main() -> anyhow::Result<()> {
     }
     #[cfg(not(unix))]
     {
+        // On non-unix platforms SIGTERM is unavailable; only SIGINT (Ctrl-C) is
+        // handled.  We spawn the signal waiter as a task so that
+        // `run_outbox_worker` can drive the main loop, but we do NOT detach it
+        // — if `run_outbox_worker` returns before the signal fires (e.g. in a
+        // fast shutdown test), the task is dropped with the runtime and
+        // `shutdown_clone.cancel()` is never called.  Since `run_outbox_worker`
+        // observes the same `shutdown` token, this is harmless: the token is
+        // already cancelled (or the process is about to exit).  The pattern
+        // mirrors the unix branch where the signal task is also fire-and-forget.
         let shutdown_clone = shutdown.clone();
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;

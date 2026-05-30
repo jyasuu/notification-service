@@ -330,13 +330,13 @@ fn serialize_recipient_list(
     if list.is_empty() {
         return Ok(None);
     }
-    serde_json::to_value(
-        list.iter()
-            .map(|r| serde_json::json!({"email": r.email, "name": r.name}))
-            .collect::<Vec<_>>(),
-    )
-    .map(Some)
-    .map_err(|e| AppError::permanent_mailer(format!("failed to serialize {field}: {e}")))
+    // `Recipient` derives `Serialize`, so we serialise the slice directly.
+    // Using manual `json!` construction was fragile: any new field added to
+    // `Recipient` would be silently omitted from the stored JSONB, causing
+    // round-trip divergence on retry.
+    serde_json::to_value(list)
+        .map(Some)
+        .map_err(|e| AppError::permanent_mailer(format!("failed to serialize {field}: {e}")))
 }
 
 /// Process all recipients as a single group email (group send mode).
@@ -582,15 +582,19 @@ pub async fn process_group(
         Err(e) => return RecipientOutcome::Failed(e),
     };
 
-    // The primary row is always first.  Its result drives the terminal-state
-    // check; secondary results are not inspected here because:
-    //   • InsertResult::Inserted — new row, proceed normally.
-    //   • InsertResult::Duplicate { Sent | Blocked } — already terminal; the
-    //     filter step below (step 4) will mark them BLOCKED if re-filtered, or
-    //     execute_send will find them SENT via the mark_sent no-op.
-    //   • InsertResult::Duplicate { non-terminal } — treated as a retry for
-    //     that recipient; execute_send will re-attempt delivery.
-    let primary_insert = match insert_results.into_iter().next() {
+    // ── 3b. Inspect insert results ────────────────────────────────────────────
+    //
+    // The primary row is always first and drives the terminal-state check.
+    //
+    // Secondary rows (GroupRetryMode::Individual only) are also inspected so
+    // we can:
+    //   • Count how many were already SENT in a prior partial attempt, and
+    //     exclude them from the To: header of the retry email (partial send).
+    //   • Warn operators when GroupRetryMode::Whole causes a full-group resend
+    //     that may reach recipients who were already delivered to.
+    let mut results_iter = insert_results.into_iter();
+
+    let primary_insert = match results_iter.next() {
         Some(r) => r,
         None => {
             return RecipientOutcome::Failed(AppError::permanent_mailer(
@@ -605,6 +609,11 @@ pub async fn process_group(
             ref status,
         } => match NotificationStatus::try_from(status.as_str()) {
             Ok(NotificationStatus::Sent) | Ok(NotificationStatus::Blocked) => {
+                // For GroupRetryMode::Whole the primary row represents the whole
+                // group; terminal primary → entire event is done.
+                // For GroupRetryMode::Individual every recipient has its own row;
+                // the caller (runner) drives per-recipient retries, so Skipped
+                // here means this individual row is already terminal.
                 info!("Group send: skipping already-terminal event");
                 return RecipientOutcome::Skipped;
             }
@@ -614,6 +623,55 @@ pub async fn process_group(
             Err(e) => return RecipientOutcome::Failed(e),
         },
         InsertResult::Inserted => {}
+    }
+
+    // ── 3c. Secondary-row status inspection (GroupRetryMode::Individual) ──────
+    //
+    // When retry_mode = Individual we inserted one row per recipient.
+    // Walk the remaining results to build the set of addresses that are
+    // already SENT from a previous partial attempt.  These will be stripped
+    // from the To: list so the retry email is only sent to genuinely unsent
+    // addresses — avoiding double-delivery to recipients the SMTP server
+    // already accepted in the prior attempt.
+    //
+    // For GroupRetryMode::Whole there is only one row (the primary), so
+    // results_iter is now exhausted and this block is a no-op.  Instead,
+    // a warn is emitted below when the whole-group email is about to be
+    // resent and some recipients may have already received it.
+    let mut already_sent_emails: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+    if email_opts.group_retry_mode == GroupRetryMode::Individual {
+        // `recipients` and the secondary insert results are in the same order
+        // (skip(1) because index 0 is the primary, already consumed above).
+        for (r, result) in recipients.iter().skip(1).zip(results_iter) {
+            match result {
+                InsertResult::Duplicate { ref status, .. } => {
+                    match NotificationStatus::try_from(status.as_str()) {
+                        Ok(NotificationStatus::Sent) | Ok(NotificationStatus::Blocked) => {
+                            // Already delivered or explicitly blocked in a prior
+                            // attempt — exclude from the To: header of the retry.
+                            already_sent_emails.insert(&r.email);
+                        }
+                        Ok(_) | Err(_) => {
+                            // Non-terminal duplicate or unknown status — include in
+                            // the retry; execute_send will re-attempt delivery.
+                        }
+                    }
+                }
+                InsertResult::Inserted => {} // fresh row — include normally
+            }
+        }
+
+        if !already_sent_emails.is_empty() {
+            warn!(
+                event_id          = %event.event_id,
+                already_sent      = already_sent_emails.len(),
+                total_recipients  = recipients.len(),
+                "Group send (Individual mode): {} recipient(s) already SENT/BLOCKED in a \
+                 prior partial attempt — excluding from retry To: list to avoid double-delivery",
+                already_sent_emails.len(),
+            );
+        }
     }
 
     // ── 4. Recipient filter — partition To: addresses into allowed / blocked ───
@@ -671,13 +729,37 @@ pub async fn process_group(
         return RecipientOutcome::Blocked("all TO recipients blocked by filter".into());
     }
 
+    // ── 4b. Partial-send: exclude already-SENT/BLOCKED recipients ─────────────
+    // For GroupRetryMode::Individual, `already_sent_emails` was populated in
+    // step 3c with addresses whose DB row came back as Duplicate { Sent | Blocked }
+    // — meaning they were successfully delivered (or explicitly blocked) in a
+    // prior partial attempt.  Strip them from the To: list now so the retry
+    // email is only sent to genuinely unsent addresses.
+    //
+    // For GroupRetryMode::Whole this set is always empty (only the primary row
+    // is written), so the filter below is a no-op.  The delivery.rs caller
+    // already emits a warn about potential double-delivery in that mode; no
+    // additional warn is needed here.
+    let allowed_recipients: Vec<&Recipient> = if already_sent_emails.is_empty() {
+        allowed_recipients
+    } else {
+        allowed_recipients
+            .into_iter()
+            .filter(|r| !already_sent_emails.contains(r.email.as_str()))
+            .collect()
+    };
+
     // Shadow `recipients` so the rest of the function operates only on the
-    // allowed subset — template rendering, EmailMessage construction, DB
-    // mark_sent calls, and the `to_count` log field all stay consistent.
+    // allowed + unsent subset — template rendering, EmailMessage construction,
+    // DB mark_sent calls, and the `to_count` log field all stay consistent.
     let recipients = allowed_recipients;
 
     // (subject, body_html, body_text rendered above at step 2c, before the DB write)
 
+    // `primary` is `recipients[0]` from the original (pre-filter) list and was
+    // confirmed Inserted above.  It is never in `already_sent_emails` so it is
+    // always present in the shadowed `recipients` after the partial-send strip.
+    // `to_extra` holds all remaining unsent addresses.
     let to_extra: Vec<MailboxRef> = recipients
         .iter()
         .skip(1)
