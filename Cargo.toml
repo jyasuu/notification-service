@@ -27,6 +27,7 @@ anyhow = "1"
 # Logging / tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+syslog = "7"
 
 # Metrics
 metrics            = "0.23"
@@ -69,6 +70,7 @@ recipient_filter = { path = "crates/recipient_filter" }
 tokio       = { workspace = true }
 tracing     = { workspace = true }
 tracing-subscriber = { workspace = true }
+syslog      = { workspace = true }
 anyhow      = { workspace = true }
 serde       = { workspace = true }
 tokio-util  = { workspace = true }

@@ -293,16 +293,20 @@ impl std::fmt::Debug for MailerConfig {
 
 impl AppConfig {
     pub fn load() -> anyhow::Result<Self> {
+        // Canonical default values live in config/default.toml — that is the
+        // single source of truth.  Do not add set_default() calls here for
+        // values that are already present in that file; duplicating them
+        // creates two places to update and makes the effective default unclear.
+        //
+        // The load order (lowest to highest priority):
+        //   1. config/default.toml  — checked-in defaults for every field
+        //   2. config/local.toml    — developer overrides (gitignored)
+        //   3. AN__* env vars       — production / container overrides
+        //
+        // `serde(default = "...")` fns on struct fields handle defaults for
+        // fields that are not present in the TOML files at all (e.g. optional
+        // tuning knobs added in later versions).
         let cfg = config::Config::builder()
-            // Defaults
-            .set_default("http.port", 8080)?
-            .set_default("metrics_port", 9091)?
-            .set_default("amqp.queue", "email.requested")?
-            .set_default("amqp.exchange", "anvil-notify")?
-            .set_default("amqp.routing_key", "email.requested")?
-            .set_default("amqp.max_retries", 3)?
-            .set_default("amqp.retry_base_ms", 1000)?
-            .set_default("amqp.max_concurrency", 10)?
             // File-based config (optional)
             .add_source(config::File::with_name("config/default").required(false))
             .add_source(config::File::with_name("config/local").required(false))

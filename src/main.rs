@@ -1,4 +1,5 @@
 mod config;
+mod syslog_layer;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -25,9 +26,21 @@ use config::{AppConfig, MailerConfig};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // ── Tracing ───────────────────────────────────────────────────────────────
-    // LOG_FORMAT=json   → structured JSON (default in Docker / production)
-    // LOG_FORMAT=pretty  → human-readable coloured output (local dev)
-    // LOG_FORMAT=compact → human-readable, no colours (CI / plain terminals)
+    // LOG_FORMAT controls the log sink and format:
+    //
+    //   json    — structured JSON to stdout (default; best for Docker/k8s)
+    //   pretty  — human-readable coloured output (local dev)
+    //   compact — human-readable, no colours (CI / plain terminals)
+    //   syslog  — emit to syslog (local Unix socket or remote UDP/TCP)
+    //             see src/syslog_layer.rs for LOG_SYSLOG_SERVER /
+    //             LOG_SYSLOG_FACILITY / LOG_SYSLOG_IDENT knobs.
+    //
+    // nginx equivalence (remote syslog):
+    //   error_log syslog:server=10.0.0.1:514,facility=local7,tag=anvil-notify;
+    //   ->  LOG_FORMAT=syslog
+    //       LOG_SYSLOG_SERVER=10.0.0.1:514
+    //       LOG_SYSLOG_FACILITY=local7
+    //       LOG_SYSLOG_IDENT=anvil-notify
     let log_format = std::env::var("LOG_FORMAT").unwrap_or_else(|_| "json".into());
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     let registry = tracing_subscriber::registry().with(filter);
@@ -38,6 +51,11 @@ async fn main() -> anyhow::Result<()> {
         "compact" => registry
             .with(tracing_subscriber::fmt::layer().compact())
             .init(),
+        "syslog" => {
+            let syslog = syslog_layer::SyslogLayer::from_env()
+                .context("Failed to initialise syslog transport")?;
+            registry.with(syslog).init();
+        }
         _ => registry
             .with(tracing_subscriber::fmt::layer().json())
             .init(),
@@ -401,6 +419,33 @@ async fn main() -> anyhow::Result<()> {
         max_rl_waits: cfg.amqp.max_rl_waits,
         max_recipients_per_event: cfg.amqp.max_recipients_per_event,
     };
+
+    // Warn when the product of max_concurrency and max_attachment_bytes exceeds
+    // 512 MiB.  At that point a single burst of large-attachment events can OOM
+    // the process before the OS's OOM killer intervenes.  The threshold is
+    // generous to avoid false-positive warnings on typical deployments.
+    const ATTACHMENT_MEMORY_WARN_BYTES: usize = 512 * 1024 * 1024; // 512 MiB
+    let peak_attachment_bytes = cfg
+        .amqp
+        .max_concurrency
+        .saturating_mul(cfg.max_attachment_bytes);
+    if peak_attachment_bytes > ATTACHMENT_MEMORY_WARN_BYTES {
+        tracing::warn!(
+            max_concurrency      = cfg.amqp.max_concurrency,
+            max_attachment_bytes = cfg.max_attachment_bytes,
+            peak_attachment_mib  = peak_attachment_bytes / (1024 * 1024),
+            threshold_mib        = ATTACHMENT_MEMORY_WARN_BYTES / (1024 * 1024),
+            "Peak attachment memory (max_concurrency x max_attachment_bytes) exceeds              {} MiB. A burst of large-attachment events may exhaust container memory.              Consider reducing max_concurrency or max_attachment_bytes in your config.",
+            ATTACHMENT_MEMORY_WARN_BYTES / (1024 * 1024),
+        );
+    } else {
+        info!(
+            max_concurrency = cfg.amqp.max_concurrency,
+            max_attachment_bytes = cfg.max_attachment_bytes,
+            peak_attachment_mib = peak_attachment_bytes / (1024 * 1024),
+            "Attachment memory budget checked"
+        );
+    }
 
     let consumer_shutdown = shutdown.clone();
     let consumer_http = Arc::clone(&http);

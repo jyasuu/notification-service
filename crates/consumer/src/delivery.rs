@@ -321,18 +321,22 @@ pub(crate) async fn handle_delivery(
     // Guard against pathologically large recipient lists that would monopolise
     // the semaphore permit for an unbounded duration and exhaust DB connections.
     //
-    // Rather than NACKing to the DLQ (which hides the event from the status
-    // API and forces manual DLQ inspection), we write one FAILED row per
-    // recipient and ACK the message.  This makes every affected address
-    // visible via GET /emails/{event_id} and recoverable via the retry API
-    // once the publisher reduces the list or the limit is raised.
+    // We write a single sentinel FAILED row for the first recipient only (not
+    // one per recipient — that would itself be a large DB write storm for a
+    // 500-recipient event).  The sentinel is enough for GET /emails/{event_id}
+    // to surface the event and for operators to see what happened.  The retry
+    // API will not replay this event until the publisher resends with a shorter
+    // list, but operators can see the failure via the status endpoint.
+    //
+    // The AMQP message is ACK'd: the event-level problem (too many recipients)
+    // is not transient and re-queuing would loop forever.
     if email_opts.recipients.len() > cfg.max_recipients_per_event {
         error!(
             event_id        = %event.event_id,
             event_type      = %event.event_type,
             recipient_count = email_opts.recipients.len(),
             limit           = cfg.max_recipients_per_event,
-            "Event exceeds max_recipients_per_event — writing FAILED rows for all recipients and ACKing"
+            "Event exceeds max_recipients_per_event — writing sentinel FAILED row and ACKing"
         );
         let reason = format!(
             "recipient count {} exceeds max_recipients_per_event {} — \
@@ -340,7 +344,7 @@ pub(crate) async fn handle_delivery(
             email_opts.recipients.len(),
             cfg.max_recipients_per_event,
         );
-        insert_failed_for_all_recipients(&ctx.store, &event, &email_opts, &reason).await;
+        insert_sentinel_failed_row(&ctx.store, &event, &email_opts, &reason).await;
         let _ = delivery.ack(BasicAckOptions::default()).await;
         return;
     }
@@ -925,93 +929,23 @@ pub(crate) async fn process_one_group(
             // `To:` header shows only their own address; the shared-`To:`
             // visibility of the original group email is not preserved on retry.
             RecipientOutcome::GroupFailedWithIndividualRows(ref e) => {
-                // Build the set of already-terminal addresses so we can skip
-                // spawning tasks for them.  The idempotency guard inside
-                // process_one_recipient would catch them too, but these DB
-                // round-trips have zero value and add latency proportional to
-                // the number of already-delivered recipients.
-                //
-                // For GroupRetryMode::Whole only the primary row exists, so
-                // this set is typically empty and the loop is a no-op.
-                // For GroupRetryMode::Individual the partial-send strip in
-                // process_group already excluded these addresses from the To:
-                // header; we mirror that here at the task-spawn level.
-                use common::NotificationStatus;
-                let mut already_terminal: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-                for r in &email_opts.recipients {
-                    if let Ok(log) = ctx
-                        .store
-                        .get_by_event_and_recipient(event.event_id, &r.email)
-                        .await
-                    {
-                        if matches!(
-                            log.status,
-                            NotificationStatus::Sent | NotificationStatus::Blocked
-                        ) {
-                            already_terminal.insert(r.email.clone());
-                        }
-                    }
-                }
-
-                let unsent_count = email_opts
-                    .recipients
-                    .len()
-                    .saturating_sub(already_terminal.len());
                 warn!(
-                    event_id         = %event.event_id,
-                    error            = %e,
-                    recipient_count  = email_opts.recipients.len(),
-                    already_terminal = already_terminal.len(),
-                    unsent           = unsent_count,
+                    event_id        = %event.event_id,
+                    error           = %e,
+                    recipient_count = email_opts.recipients.len(),
                     "Group send failed after per-recipient rows written \
                      — falling back to individual retry path"
                 );
-                let mut join_set = tokio::task::JoinSet::new();
-                for recipient in email_opts.recipients.clone() {
-                    if already_terminal.contains(&recipient.email) {
-                        continue;
-                    }
-                    let ctx = ctx.clone();
-                    let event = event.clone();
-                    let opts = email_opts.clone();
-                    let atts = attachments.to_vec();
-                    let cfg = cfg.clone();
-                    let shutdown = shutdown.clone();
-                    let cc_bcc = cc_bcc.clone();
-                    join_set.spawn(async move {
-                        process_one_recipient(
-                            &ctx, &event, &opts, &recipient, &atts, &cc_bcc, &cfg, &shutdown,
-                        )
-                        .await;
-                    });
-                }
-                let recipient_count = email_opts.recipients.len();
-                let mut panics = 0usize;
-                while let Some(result) = join_set.join_next().await {
-                    if let Err(e) = result {
-                        error!(
-                            event_id = %event.event_id,
-                            error    = %e,
-                            "Individual-retry task panicked during group-send fallback"
-                        );
-                        panics += 1;
-                    }
-                }
-                if panics > 0 {
-                    error!(
-                        event_id        = %event.event_id,
-                        recipient_count,
-                        panics,
-                        "Group-send individual fallback complete — some tasks panicked"
-                    );
-                } else {
-                    tracing::info!(
-                        event_id        = %event.event_id,
-                        recipient_count,
-                        "Group-send individual fallback complete"
-                    );
-                }
+                fallback_to_individual_sends(
+                    ctx,
+                    event,
+                    email_opts,
+                    attachments,
+                    cc_bcc.clone(),
+                    cfg,
+                    shutdown,
+                )
+                .await;
                 return;
             }
 
@@ -1026,6 +960,23 @@ pub(crate) async fn process_one_group(
                         .saturating_mul(1u64 << attempt.min(10))
                         .min(MAX_RETRY_DELAY_MS),
                 );
+                // Warn on the first failure of a Whole-mode group send that will be
+                // retried: if the SMTP server accepted any recipients before failing,
+                // those addresses will receive the email a second time on retry.
+                // Operators should investigate and consider switching to
+                // group_retry_mode = "individual" for safer retry semantics.
+                if attempt == 1 && email_opts.group_retry_mode == GroupRetryMode::Whole {
+                    warn!(
+                        event_id        = %event.event_id,
+                        event_type      = %event.event_type,
+                        recipients      = email_opts.recipients.len(),
+                        error           = %e,
+                        "Group send (group_retry_mode=whole) failed on first attempt — \
+                         any recipients already accepted by the SMTP server before the \
+                         failure may receive a duplicate email on retry. \
+                         Consider using group_retry_mode=individual to avoid double-sends."
+                    );
+                }
                 warn!(
                     event_id = %event.event_id,
                     attempt,
@@ -1057,87 +1008,192 @@ pub(crate) async fn process_one_group(
     }
 }
 
-/// Write a FAILED row for every recipient in an oversized event so operators
-/// can see and recover them via the status/retry API without touching the DLQ.
+/// Fall back to individual per-recipient sends after a group send fails with
+/// [`RecipientOutcome::GroupFailedWithIndividualRows`].
 ///
-/// Errors from individual inserts are logged and skipped — a partial write is
-/// better than silently dropping all rows.  The caller ACKs the AMQP message
-/// regardless, since the event-level problem (too many recipients) is not
-/// transient and re-queuing would loop forever.
-async fn insert_failed_for_all_recipients(
+/// When `process_group` writes a `notification_log` row per recipient before
+/// the send attempt fails, re-sending the whole group email would duplicate
+/// recipients already accepted by the SMTP server.  This function spawns an
+/// independent `process_one_recipient` task for each address that is not yet
+/// in a terminal state (`SENT` or `BLOCKED`), so only genuinely unsent
+/// addresses receive a new (individual) email.
+///
+/// Trade-off: retried recipients receive an individual email whose `To:` header
+/// shows only their own address; the shared-`To:` visibility of the original
+/// group email is not preserved on retry.
+async fn fallback_to_individual_sends(
+    ctx: &ProcessorContext,
+    event: &NotificationEvent,
+    email_opts: &common::EmailOptions,
+    attachments: &[ResolvedAttachment],
+    cc_bcc: Arc<EffectiveCcBcc>,
+    cfg: &ConsumerConfig,
+    shutdown: &CancellationToken,
+) {
+    use common::NotificationStatus;
+
+    // Build the set of already-terminal addresses so we can skip spawning
+    // tasks for them.  The idempotency guard inside process_one_recipient
+    // would catch them too, but these DB round-trips have zero value and add
+    // latency proportional to the number of already-delivered recipients.
+    let mut already_terminal: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for r in &email_opts.recipients {
+        if let Ok(log) = ctx
+            .store
+            .get_by_event_and_recipient(event.event_id, &r.email)
+            .await
+        {
+            if matches!(
+                log.status,
+                NotificationStatus::Sent | NotificationStatus::Blocked
+            ) {
+                already_terminal.insert(r.email.clone());
+            }
+        }
+    }
+
+    let unsent_count = email_opts
+        .recipients
+        .len()
+        .saturating_sub(already_terminal.len());
+    tracing::info!(
+        event_id         = %event.event_id,
+        recipient_count  = email_opts.recipients.len(),
+        already_terminal = already_terminal.len(),
+        unsent           = unsent_count,
+        "Group-send fallback: spawning individual tasks for unsent recipients"
+    );
+
+    let mut join_set = tokio::task::JoinSet::new();
+    for recipient in email_opts.recipients.clone() {
+        if already_terminal.contains(&recipient.email) {
+            continue;
+        }
+        let ctx = ctx.clone();
+        let event = event.clone();
+        let opts = email_opts.clone();
+        let atts = attachments.to_vec();
+        let cfg = cfg.clone();
+        let shutdown = shutdown.clone();
+        let cc_bcc = cc_bcc.clone();
+        join_set.spawn(async move {
+            process_one_recipient(
+                &ctx, &event, &opts, &recipient, &atts, &cc_bcc, &cfg, &shutdown,
+            )
+            .await;
+        });
+    }
+
+    let recipient_count = email_opts.recipients.len();
+    let mut panics = 0usize;
+    while let Some(result) = join_set.join_next().await {
+        if let Err(e) = result {
+            error!(
+                event_id = %event.event_id,
+                error    = %e,
+                "Individual-retry task panicked during group-send fallback"
+            );
+            panics += 1;
+        }
+    }
+    if panics > 0 {
+        error!(
+            event_id        = %event.event_id,
+            recipient_count,
+            panics,
+            "Group-send individual fallback complete — some tasks panicked"
+        );
+    } else {
+        tracing::info!(
+            event_id        = %event.event_id,
+            recipient_count,
+            "Group-send individual fallback complete"
+        );
+    }
+}
+
+/// Write a single sentinel FAILED row for the first recipient in an oversized
+/// event.  One row is sufficient for the event to surface in the status API
+/// (`GET /emails/{event_id}`) so operators can see what happened without
+/// performing a write per recipient (which would itself be a write storm for a
+/// 500-recipient event exceeding the limit).
+///
+/// The sentinel row uses the first recipient only.  The caller ACKs the AMQP
+/// message; the event-level problem (too many recipients) is not transient.
+async fn insert_sentinel_failed_row(
     store: &Arc<dyn NotificationStore>,
     event: &NotificationEvent,
     email_opts: &common::EmailOptions,
     reason: &str,
 ) {
-    for r in &email_opts.recipients {
-        let args = EmailInsertPendingArgs {
-            event_id: event.event_id,
-            event_type: &event.event_type,
-            recipient_email: &r.email,
-            payload: &event.payload,
-            event_timestamp: event.timestamp,
-            recipient_name: r.name.as_deref(),
-            from_override: None,
-            attachments: None,
-            sender_account: None,
-            cc: None,
-            bcc: None,
-            send_mode: "individual",
-            group_retry_mode: None,
-            to_recipients: None,
-        };
-        match store.insert_pending(&args).await {
-            Ok(InsertResult::Duplicate { ref status, .. }) => {
-                use common::NotificationStatus;
-                // Row already exists in a terminal state — do not overwrite it.
-                // Calling mark_failed on a SENT row would silently reset it to
-                // FAILED, which is incorrect.  Skip and log at debug level.
-                match NotificationStatus::try_from(status.as_str()) {
-                    Ok(NotificationStatus::Sent) | Ok(NotificationStatus::Blocked) => {
-                        tracing::debug!(
-                            event_id = %event.event_id,
-                            email    = %r.email,
-                            status,
-                            "insert_failed_for_all_recipients: row already terminal — skipping"
-                        );
-                        continue;
-                    }
-                    _ => {} // non-terminal duplicate — fall through to mark_failed
-                }
-                if let Err(e) = store
-                    .mark_failed(event.event_id, &r.email, reason, true)
-                    .await
-                {
-                    error!(
-                        event_id  = %event.event_id,
-                        email     = %r.email,
-                        error     = %e,
-                        "insert_failed_for_all_recipients: mark_failed error (duplicate row)"
+    let Some(primary) = email_opts.recipients.first() else {
+        // Empty recipient list — nothing to write.
+        return;
+    };
+    let args = EmailInsertPendingArgs {
+        event_id: event.event_id,
+        event_type: &event.event_type,
+        recipient_email: &primary.email,
+        payload: &event.payload,
+        event_timestamp: event.timestamp,
+        recipient_name: primary.name.as_deref(),
+        from_override: None,
+        attachments: None,
+        sender_account: None,
+        cc: None,
+        bcc: None,
+        send_mode: "individual",
+        group_retry_mode: None,
+        to_recipients: None,
+    };
+    match store.insert_pending(&args).await {
+        Ok(InsertResult::Duplicate { ref status, .. }) => {
+            use common::NotificationStatus;
+            match NotificationStatus::try_from(status.as_str()) {
+                Ok(NotificationStatus::Sent) | Ok(NotificationStatus::Blocked) => {
+                    // Already terminal — do not overwrite.
+                    tracing::debug!(
+                        event_id = %event.event_id,
+                        email    = %primary.email,
+                        status,
+                        "insert_sentinel_failed_row: sentinel row already terminal — skipping"
                     );
+                    return;
                 }
+                _ => {} // non-terminal duplicate — fall through to mark_failed
             }
-            Ok(InsertResult::Inserted) => {
-                if let Err(e) = store
-                    .mark_failed(event.event_id, &r.email, reason, true)
-                    .await
-                {
-                    error!(
-                        event_id  = %event.event_id,
-                        email     = %r.email,
-                        error     = %e,
-                        "insert_failed_for_all_recipients: mark_failed error"
-                    );
-                }
-            }
-            Err(e) => {
+            if let Err(e) = store
+                .mark_failed(event.event_id, &primary.email, reason, true)
+                .await
+            {
                 error!(
-                    event_id  = %event.event_id,
-                    email     = %r.email,
-                    error     = %e,
-                    "insert_failed_for_all_recipients: insert_pending error"
+                    event_id = %event.event_id,
+                    email    = %primary.email,
+                    error    = %e,
+                    "insert_sentinel_failed_row: mark_failed error (duplicate row)"
                 );
             }
+        }
+        Ok(InsertResult::Inserted) => {
+            if let Err(e) = store
+                .mark_failed(event.event_id, &primary.email, reason, true)
+                .await
+            {
+                error!(
+                    event_id = %event.event_id,
+                    email    = %primary.email,
+                    error    = %e,
+                    "insert_sentinel_failed_row: mark_failed error"
+                );
+            }
+        }
+        Err(e) => {
+            error!(
+                event_id = %event.event_id,
+                email    = %primary.email,
+                error    = %e,
+                "insert_sentinel_failed_row: insert_pending error"
+            );
         }
     }
 }
