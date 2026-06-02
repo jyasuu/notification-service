@@ -31,8 +31,8 @@ governor    = { version = "0.6", features = ["futures"] }
 integration = []
 
 [dev-dependencies]
-axum-test   = "15"
 tokio       = { workspace = true }
 serde_json  = { workspace = true }
 sqlx        = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "migrate"] }
 uuid        = { workspace = true }
+tower       = "0.5"

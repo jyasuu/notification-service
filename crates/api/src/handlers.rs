@@ -550,7 +550,7 @@ pub async fn get_template(
 /// Returns:
 /// * 201 — new row inserted
 /// * 200 — existing row updated (or unchanged)
-/// * 400 — validation failure
+/// * 422 — validation failure (missing or empty required field)
 pub async fn upsert_template(
     State(state): State<ApiState>,
     Json(body): Json<serde_json::Value>,

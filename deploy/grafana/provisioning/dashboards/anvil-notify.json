@@ -1,0 +1,596 @@
+{
+  "__inputs": [],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "11.0.0" },
+    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" },
+    { "type": "panel", "id": "timeseries", "name": "Time series", "version": "" },
+    { "type": "panel", "id": "stat", "name": "Stat", "version": "" },
+    { "type": "panel", "id": "gauge", "name": "Gauge", "version": "" }
+  ],
+  "annotations": { "list": [] },
+  "description": "anvil-notify — email delivery service overview",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "📬 Delivery",
+      "type": "row"
+    },
+
+    {
+      "id": 1,
+      "title": "Emails sent (total)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null }
+          ]},
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "area" },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "expr": "sum(emails_sent_total)",
+        "legendFormat": "sent",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 2,
+      "title": "Emails failed (total)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 1 },
+            { "color": "red", "value": 10 }
+          ]},
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "area" },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "expr": "sum(emails_failed_total)",
+        "legendFormat": "failed",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 3,
+      "title": "Emails blocked (total)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "blue", "value": null }
+          ]},
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "area" },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "expr": "sum(emails_blocked_total)",
+        "legendFormat": "blocked",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 4,
+      "title": "Failure rate (5m)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 0.01 },
+            { "color": "red", "value": 0.05 }
+          ]},
+          "mappings": [],
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "none" },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "expr": "sum(rate(emails_failed_total[5m])) / (sum(rate(emails_sent_total[5m])) + sum(rate(emails_failed_total[5m])) + 1e-9)",
+        "legendFormat": "failure rate",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 5,
+      "title": "Send throughput (rate/min)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10, "gradientMode": "none", "spanNulls": false },
+          "unit": "short"
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "failed" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "blocked" }, "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "sent" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] }
+        ]
+      },
+      "options": { "legend": { "calcs": ["rate"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(rate(emails_sent_total[1m])) * 60",
+          "legendFormat": "sent",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(rate(emails_failed_total[1m])) * 60",
+          "legendFormat": "failed",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(rate(emails_blocked_total[1m])) * 60",
+          "legendFormat": "blocked",
+          "refId": "C"
+        }
+      ]
+    },
+
+    {
+      "id": 6,
+      "title": "Send latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 5, "gradientMode": "none", "spanNulls": false },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(email_send_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(email_send_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(email_send_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ]
+    },
+
+    {
+      "id": 7,
+      "title": "Failures by reason",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10, "gradientMode": "none", "spanNulls": false },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "calcs": ["rate"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "expr": "sum by (reason) (rate(emails_failed_total[5m])) * 60",
+        "legendFormat": "{{reason}}",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 8,
+      "title": "Throughput by event type",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 5, "gradientMode": "none", "spanNulls": false },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "calcs": ["rate"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "expr": "sum by (event_type) (rate(emails_sent_total[1m])) * 60",
+        "legendFormat": "{{event_type}}",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 },
+      "id": 101,
+      "title": "🔁 Rate limiting & retries",
+      "type": "row"
+    },
+
+    {
+      "id": 9,
+      "title": "Rate limit waits (rate/min)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10, "gradientMode": "none", "spanNulls": false },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "calcs": ["rate"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "expr": "sum by (event_type) (rate(email_rate_limit_waits_total[1m])) * 60",
+        "legendFormat": "{{event_type}}",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 10,
+      "title": "Retry publish failures",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "red", "value": 1 }
+          ]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "area" },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "expr": "sum(retry_publish_failed_total)",
+        "legendFormat": "retry publish failures",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 11,
+      "title": "Consumer reconnects",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 1 },
+            { "color": "red", "value": 5 }
+          ]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "area" },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "expr": "sum(consumer_reconnects_total)",
+        "legendFormat": "reconnects",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 29 },
+      "id": 102,
+      "title": "📎 Attachments",
+      "type": "row"
+    },
+
+    {
+      "id": 12,
+      "title": "Attachment fetches by result",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 30 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10, "gradientMode": "none", "spanNulls": false },
+          "unit": "short"
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "success" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "permanent_failure" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "transient_failure" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] }
+        ]
+      },
+      "options": { "legend": { "calcs": ["rate"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "expr": "sum by (result) (rate(attachment_fetch_total[5m])) * 60",
+        "legendFormat": "{{result}}",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 13,
+      "title": "Attachment fetch latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 30 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 5, "gradientMode": "none", "spanNulls": false },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(attachment_fetch_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(attachment_fetch_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(attachment_fetch_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ]
+    },
+
+    {
+      "id": 14,
+      "title": "Attachment fetch retries (rate/min)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 37 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "orange" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10, "gradientMode": "none", "spanNulls": false },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "calcs": ["rate"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "expr": "sum(rate(attachment_fetch_retries_total[1m])) * 60",
+        "legendFormat": "retries",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 44 },
+      "id": 103,
+      "title": "📤 Outbox",
+      "type": "row"
+    },
+
+    {
+      "id": 15,
+      "title": "Outbox published (rate/min)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 45 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10, "gradientMode": "none", "spanNulls": false },
+          "unit": "short"
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "published" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "failed" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }
+        ]
+      },
+      "options": { "legend": { "calcs": ["rate"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(rate(outbox_published_total[1m])) * 60",
+          "legendFormat": "published",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(rate(outbox_publish_failed_total[1m])) * 60",
+          "legendFormat": "failed",
+          "refId": "B"
+        }
+      ]
+    },
+
+    {
+      "id": 16,
+      "title": "Outbox publish failures (total)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 45 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "red", "value": 1 }
+          ]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "area" },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "expr": "sum(outbox_publish_failed_total)",
+        "legendFormat": "outbox publish failures",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 52 },
+      "id": 104,
+      "title": "🌐 API",
+      "type": "row"
+    },
+
+    {
+      "id": 17,
+      "title": "API send requests (rate/min)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 53 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "blue" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10, "gradientMode": "none", "spanNulls": false },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "calcs": ["rate"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "expr": "sum(rate(api_send_email_total[1m])) * 60",
+        "legendFormat": "POST /send",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 18,
+      "title": "mark_sent errors (rate/min)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 53 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "red" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10, "gradientMode": "none", "spanNulls": false },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "calcs": ["rate"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(rate(email_mark_sent_failed_total[1m])) * 60",
+          "legendFormat": "mark_sent failures",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(rate(email_group_mark_sent_partial_total[1m])) * 60",
+          "legendFormat": "partial group failures",
+          "refId": "B"
+        }
+      ]
+    }
+
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["anvil-notify", "email"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data source",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "anvil-notify",
+  "uid": "anvil-notify-v1",
+  "version": 1
+}
